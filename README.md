@@ -4,6 +4,15 @@
 
 Wave-Safe is a unified web-based coastal safety and intelligence platform that combines real-time ocean and weather intelligence, trip planning, emergency coordination, and rescue tracking into one coastal travel experience.
 
+<div align="center">
+  <br />
+  <p><b>🎬 Project Walkthrough & Demo (1 Minute)</b></p>
+  <a href="https://youtu.be/AKZOnFFqXSo" target="_blank">
+    <img src="https://img.youtube.com/vi/AKZOnFFqXSo/maxresdefault.jpg" alt="Demo Video" width="80%" style="border-radius: 8px;" />
+  </a>
+  <p><i>👆 Click image to watch the full 1-minute demo video!</i></p>
+</div>
+
 ## 👥 Team
 
 **Team Name:** LazyCoders
