@@ -177,7 +177,7 @@ export default function YourTrips() {
           <>
             <img
               className="trip-icon"
-              src="public/assets/Vector(1).svg"
+              src="assets/Vector(1).svg"
               alt=""
               aria-hidden="true"
             />
