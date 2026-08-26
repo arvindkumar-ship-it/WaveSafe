@@ -72,6 +72,17 @@ function formatMetric(value, decimals = 2) {
   return n === null ? "—" : n.toFixed(decimals);
 }
 
+function formatDistance(value) {
+  const n = num(value);
+  if (n === null) return "—";
+  return n >= 1000 ? `${(n / 1000).toFixed(1)} km` : `${Math.round(n)} m`;
+}
+
+function getSafeZones(beach) {
+  const list = Array.isArray(beach?.safe_zones) ? beach.safe_zones : [];
+  return [...list].sort((a, b) => (num(a?.distance_m) ?? Infinity) - (num(b?.distance_m) ?? Infinity));
+}
+
 // ── Mock fallbacks jab backend data nahi aata ────────────────────────────────
 function getMockRisk(activity = "swimming") {
   const scores = { swimming: 0.28, surfing: 0.42, beach_walk: 0.15, snorkeling: 0.35, diving: 0.48 };
@@ -247,6 +258,9 @@ export default function BeachPublicPage() {
   }, [forecast, risk]);
 
   const meta = useMemo(() => riskMeta(overviewRisk), [overviewRisk]);
+  const safeZones = useMemo(() => getSafeZones(beach), [beach]);
+  const recommendedZone = safeZones[0] || null;
+  const otherZones = safeZones.slice(1, 4);
   const safeStart = first(risk, ["safe_window_start"]);
   const safeEnd = first(risk, ["safe_window_end"]);
   const overviewMessage = meta.label === "SAFE"
@@ -375,11 +389,55 @@ export default function BeachPublicPage() {
       <section className="panel services-panel" id="services">
         <div className="panel-heading"><h2>Nearby Services</h2></div>
         <div className="services-grid">
-          <article className="service-card"><img src="/assets/beach-details/icons/Group 35.svg" alt="" /><h3>Hospital</h3><strong>{text(first(beach, ["services.hospital", "hospital_distance"]))}</strong><div className="service-bar"><i></i></div></article>
-          <article className="service-card"><img src="/assets/beach-details/icons/Group 36.svg" alt="" /><h3>Police Station</h3><strong>{text(first(beach, ["services.police_station", "police_distance"]))}</strong><div className="service-bar"><i></i></div></article>
-          <article className="service-card"><img src="/assets/beach-details/icons/Group 37.svg" alt="" /><h3>Lifeguard Post</h3><strong>{text(first(beach, ["services.lifeguard", "lifeguard"]))}</strong><div className="service-bar"><i></i></div></article>
-          <article className="service-card"><img src="/assets/beach-details/icons/car-inbound.svg" alt="" /><h3>Parking</h3><strong>{text(first(beach, ["services.parking", "parking"]))}</strong><div className="service-bar"><i></i></div></article>
+          {/* Safe Zone 1 — nearest */}
+          <article className="service-card">
+            <img src="/assets/beach-details/icons/Group 35.svg" alt="" />
+            <h3>Safe Zone 1</h3>
+            <strong>{safeZones[0] ? formatDistance(safeZones[0].distance_m) : "—"}</strong>
+          </article>
+
+          {/* Safe Zone 2 */}
+          <article className="service-card">
+            <img src="/assets/beach-details/icons/Group 35.svg" alt="" />
+            <h3>Safe Zone 2</h3>
+            <strong>{safeZones[1] ? formatDistance(safeZones[1].distance_m) : "—"}</strong>
+          </article>
+
+          {/* Lifeguard */}
+          <article className="service-card">
+            <img src="/assets/beach-details/icons/Group 37.svg" alt="" />
+            <h3>Lifeguard Post</h3>
+            <strong>{beach?.has_lifeguard === true ? "On Beach" : beach?.has_lifeguard === false ? "Not Available" : "—"}</strong>
+          </article>
+
+          {/* Jurisdiction / Police */}
+          <article className="service-card">
+            <img src="/assets/beach-details/icons/Group 36.svg" alt="" />
+            <h3>Police Station</h3>
+            <strong>{text(first(beach, ["jurisdiction.name"]), "—")}</strong>
+          </article>
         </div>
+
+        {/* Safe zone names below cards */}
+        {safeZones.length > 0 && (
+          <div className="safezone-block">
+            <div className="safezone-heading">
+              <h3>Safe Zones Nearby</h3>
+              <span>{safeZones.length} mapped</span>
+            </div>
+            <div className="safezone-list">
+              {safeZones.map((zone, idx) => (
+                <div className={`safezone-card${idx === 0 ? " safezone-card--recommended" : ""}`} key={zone.id}>
+                  <div className="safezone-name-row">
+                    {idx === 0 && <span className="safezone-badge">Nearest</span>}
+                    <span className="safezone-name">{text(zone.name)}</span>
+                  </div>
+                  <span className="safezone-distance">{formatDistance(zone.distance_m)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </section>
 
       <section className="panel photos-panel" id="photos">
