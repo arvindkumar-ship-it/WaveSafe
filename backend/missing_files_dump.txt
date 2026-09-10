@@ -1,0 +1,961 @@
+==========================================
+FILE: app\models\incident.py
+==========================================
+# """Module 21 dependency — matches Module 2D SQL exactly."""
+# from sqlalchemy import Column, String, Numeric, Integer, DateTime, ForeignKey, func
+# from sqlalchemy.dialects.postgresql import UUID, JSONB
+# from sqlalchemy.orm import relationship
+
+# from app.core.db import Base
+
+
+# class IncidentStatus:
+#     CREATED = "created"
+#     VALIDATED = "validated"
+#     LOCATION_LOCKED = "location_locked"
+#     PACKED = "packed"
+#     DISPATCHED = "dispatched"
+#     ACKNOWLEDGED = "acknowledged"
+#     ROUTED = "routed"
+#     EN_ROUTE = "en_route"
+#     HOSPITAL_NOTIFIED = "hospital_notified"
+#     SAFE_ZONE_SHARED = "safe_zone_shared"
+#     RESOLVED = "resolved"
+#     CLOSED = "closed"
+#     ESCALATED = "escalated"
+
+
+# class IncidentReport(Base):
+#     __tablename__ = "incident_reports"
+
+#     id = Column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+#     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"))
+#     beach_id = Column(UUID(as_uuid=True), ForeignKey("beaches.id", ondelete="SET NULL"))
+#     incident_type = Column(String, nullable=False)
+#     severity = Column(String, nullable=False)
+#     lat = Column(Numeric(10, 7), nullable=False)
+#     lng = Column(Numeric(10, 7), nullable=False)
+#     description = Column(String)
+#     media = Column(JSONB, nullable=False, server_default="[]")
+#     status = Column(String, nullable=False, server_default=IncidentStatus.CREATED)
+#     trigger_type = Column(String, nullable=False)
+#     battery_pct = Column(Integer)
+#     signal_strength = Column(String)
+#     current_hazard_context = Column(JSONB, nullable=False, server_default="{}")
+#     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+#     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+#     routes = relationship("IncidentRoute", back_populates="incident", cascade="all, delete-orphan")
+#     history = relationship("IncidentStatusHistory", back_populates="incident",
+#                             cascade="all, delete-orphan", order_by="IncidentStatusHistory.changed_at")
+
+
+# class IncidentRoute(Base):
+#     __tablename__ = "incident_routes"
+
+#     id = Column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+#     incident_report_id = Column(UUID(as_uuid=True), ForeignKey("incident_reports.id", ondelete="CASCADE"),
+#                                  nullable=False, index=True)
+#     target_type = Column(String, nullable=False)      # 112 | authority | hospital | contact
+#     target_name = Column(String, nullable=False)
+#     target_id = Column(UUID(as_uuid=True))
+#     jurisdiction_id = Column(UUID(as_uuid=True), ForeignKey("jurisdictions.id"))
+#     route_rank = Column(Integer, nullable=False)
+#     routed_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+#     ack_status = Column(String, nullable=False, server_default="sent")
+#     ack_time = Column(DateTime(timezone=True))
+#     external_ref = Column(String)
+#     last_error = Column(String)
+
+#     incident = relationship("IncidentReport", back_populates="routes")
+
+
+# class IncidentStatusHistory(Base):
+#     __tablename__ = "incident_status_history"
+
+#     id = Column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+#     incident_report_id = Column(UUID(as_uuid=True), ForeignKey("incident_reports.id", ondelete="CASCADE"),
+#                                  nullable=False, index=True)
+#     from_status = Column(String)
+#     to_status = Column(String, nullable=False)
+#     reason = Column(String)
+#     changed_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+#     incident = relationship("IncidentReport", back_populates="history")
+
+
+
+
+
+
+
+
+
+"""Module 2D — Incident, notification & audit tables. Matches exact SQL:
+incident_reports, incident_routes, incident_status_history, notification_queue,
+audit_events, user_contacts, offline_sync_queue.
+
+B6 fix: IncidentStatus class (from Module 21's incident.py) merged in here — that file's
+IncidentReport/IncidentRoute/IncidentStatusHistory classes were discarded because they
+lack the `geom` generated column and use the wrong Base import; only this constants class
+was worth keeping.
+"""
+from __future__ import annotations
+from sqlalchemy import Column, Text, Boolean, Numeric, Integer, DateTime, ForeignKey, Index, Computed
+from sqlalchemy.orm import relationship
+from sqlalchemy.dialects.postgresql import UUID, JSONB
+from geoalchemy2 import Geometry
+from datetime import datetime, timezone
+
+from .base import Base, uuid_pk
+
+
+class IncidentStatus:
+    CREATED = "created"
+    VALIDATED = "validated"
+    LOCATION_LOCKED = "location_locked"
+    PACKED = "packed"
+    DISPATCHED = "dispatched"
+    ACKNOWLEDGED = "acknowledged"
+    ROUTED = "routed"
+    EN_ROUTE = "en_route"
+    HOSPITAL_NOTIFIED = "hospital_notified"
+    SAFE_ZONE_SHARED = "safe_zone_shared"
+    RESOLVED = "resolved"
+    CLOSED = "closed"
+    ESCALATED = "escalated"
+
+
+class IncidentReport(Base):
+    __tablename__ = "incident_reports"
+    __table_args__ = (Index("idx_incidents_status", "status"),)
+    id = uuid_pk()
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"))
+    beach_id = Column(UUID(as_uuid=True), ForeignKey("beaches.id", ondelete="SET NULL"))
+    incident_type = Column(Text, nullable=False)
+    severity = Column(Text, nullable=False)
+    lat = Column(Numeric(10, 7), nullable=False)
+    lng = Column(Numeric(10, 7), nullable=False)
+    # generated column — matches exact SQL's `GENERATED ALWAYS AS (...) STORED`.
+    # SQLAlchemy issues this DDL correctly; app code must never write to `geom` directly.
+    geom = Column(Geometry("POINT", srid=4326, spatial_index=False),
+                  Computed("ST_SetSRID(ST_MakePoint(lng, lat), 4326)", persisted=True))
+    description = Column(Text)
+    media = Column(JSONB, nullable=False, default=list)
+    status = Column(Text, nullable=False, default=IncidentStatus.CREATED)
+    trigger_type = Column(Text, nullable=False)
+    battery_pct = Column(Integer)
+    signal_strength = Column(Text)
+    current_hazard_context = Column(JSONB, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc),
+                         onupdate=lambda: datetime.now(timezone.utc))
+
+
+class IncidentRoute(Base):
+    __tablename__ = "incident_routes"
+    id = uuid_pk()
+    incident_report_id = Column(UUID(as_uuid=True), ForeignKey("incident_reports.id", ondelete="CASCADE"),
+                                 nullable=False, index=True)
+    target_type = Column(Text, nullable=False)
+    target_name = Column(Text, nullable=False)
+    target_id = Column(UUID(as_uuid=True))
+    jurisdiction_id = Column(UUID(as_uuid=True), ForeignKey("jurisdictions.id"))
+    route_rank = Column(Integer, nullable=False)
+    routed_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    ack_status = Column(Text, nullable=False, default="sent")
+    ack_time = Column(DateTime(timezone=True))
+    external_ref = Column(Text)
+    last_error = Column(Text)
+
+
+class IncidentStatusHistory(Base):
+    __tablename__ = "incident_status_history"
+    id = uuid_pk()
+    incident_report_id = Column(UUID(as_uuid=True), ForeignKey("incident_reports.id", ondelete="CASCADE"),
+                                 nullable=False)
+    from_status = Column(Text)
+    to_status = Column(Text, nullable=False)
+    reason = Column(Text)
+    changed_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+# class NotificationQueue(Base):
+#     __tablename__ = "notification_queue"
+#     __table_args__ = (Index("idx_notification_queue_status", "status", "scheduled_for"),)
+#     id = uuid_pk()
+#     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"))
+#     incident_report_id = Column(UUID(as_uuid=True), ForeignKey("incident_reports.id", ondelete="SET NULL"))
+#     type = Column(Text, nullable=False)
+#     priority = Column(Text, nullable=False)
+#     title = Column(Text, nullable=False)
+#     body = Column(Text, nullable=False)
+#     channel = Column(Text, nullable=False)
+#     status = Column(Text, nullable=False, default="queued")
+#     scheduled_for = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+#     sent_at = Column(DateTime(timezone=True))
+#     delivery_meta = Column(JSONB, nullable=False, default=dict)
+
+class NotificationQueue(Base):
+    __tablename__ = "notification_queue"
+    __table_args__ = (Index("idx_notification_queue_status", "status", "scheduled_for"),)
+    id = uuid_pk()
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"))
+    incident_report_id = Column(UUID(as_uuid=True), ForeignKey("incident_reports.id", ondelete="SET NULL"))
+    type = Column(Text, nullable=False)
+    priority = Column(Text, nullable=False)
+    title = Column(Text, nullable=False)
+    body = Column(Text, nullable=False)
+    channel = Column(Text, nullable=False)
+    locale = Column(Text, nullable=False, default="en")
+    full_screen = Column(Boolean, nullable=False, default=False)
+    status = Column(Text, nullable=False, default="queued")
+    scheduled_for = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    sent_at = Column(DateTime(timezone=True))
+    delivery_meta = Column(JSONB, nullable=False, default=dict)
+
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+    __table_args__ = (Index("idx_audit_events_entity", "entity_type", "entity_id"),)
+    id = uuid_pk()
+    event_type = Column(Text, nullable=False)
+    entity_type = Column(Text, nullable=False)
+    entity_id = Column(UUID(as_uuid=True))
+    actor_type = Column(Text, nullable=False)
+    actor_id = Column(UUID(as_uuid=True))
+    payload = Column(JSONB, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class UserContact(Base):
+    __tablename__ = "user_contacts"
+    id = uuid_pk()
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    name = Column(Text, nullable=False)
+    phone = Column(Text, nullable=False)
+    relation = Column(Text)
+    priority = Column(Integer, default=1)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class OfflineSyncQueue(Base):
+    __tablename__ = "offline_sync_queue"
+    id = uuid_pk()
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"))
+    entity_type = Column(Text, nullable=False)
+    entity_id = Column(UUID(as_uuid=True))
+    action_type = Column(Text, nullable=False)
+    payload = Column(JSONB, nullable=False)
+    status = Column(Text, default="pending")
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+==========================================
+FILE: app\core\security.py
+==========================================
+"""
+app/core/security.py
+
+Implements every security primitive referenced across the codebase. Signatures below were
+reverse-verified against actual call sites (not assumed):
+
+    from app.core.security import get_current_user          # offline_sync.py, safezone.py,
+                                                              #   tracking.py, trips.py, notifications.py
+    from app.core.security import get_current_admin          # audit.py, admin.py, tracking.py
+    from app.core.security import verify_internal_key         # internal.py, internal_dispatch.py,
+                                                              #   authority_router.py, hospital_router.py
+    from app.core.security import verify_partner_key          # authority_router.py, hospital_router.py
+    from app.core.security import create_access_token         # auth_service.py -> create_access_token(user.id)
+
+Usage patterns confirmed:
+    user  = Depends(get_current_user)   -> user.id is accessed directly (trips.py, safezone.py, tracking.py)
+    admin = Depends(get_current_admin)  -> admin.id is accessed directly (tracking.py patch_status)
+    _     = Depends(verify_internal_key)  -> return value discarded, only raises on failure
+    _     = Depends(verify_partner_key)   -> same
+"""
+import uuid
+from datetime import datetime, timedelta, timezone
+
+from fastapi import Depends, HTTPException, status, Header
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from jose import jwt, JWTError
+from sqlalchemy.orm import Session
+
+from app.core.config import settings
+from app.core.db import get_db
+from app.models.core import User
+
+_bearer = HTTPBearer(auto_error=False)
+
+
+# ---------------------------------------------------------------------------
+# JWT issuance (called by auth_service.verify_otp)
+# ---------------------------------------------------------------------------
+def create_access_token(user_id: uuid.UUID) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(minutes=settings.JWT_EXPIRE_MINUTES)
+    payload = {"sub": str(user_id), "exp": expire}
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+
+
+def _decode_token(token: str) -> uuid.UUID:
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+        return uuid.UUID(payload["sub"])
+    except (JWTError, KeyError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+# ---------------------------------------------------------------------------
+# End-user auth (OTP -> JWT). Used on every public route that needs a logged-in user.
+# ---------------------------------------------------------------------------
+def get_current_user(
+    creds: HTTPAuthorizationCredentials = Depends(_bearer),
+    db: Session = Depends(get_db),
+) -> User:
+    if creds is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    user_id = _decode_token(creds.credentials)
+    user = db.query(User).filter(User.id == user_id).first()
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    return user
+
+
+# ---------------------------------------------------------------------------
+# Admin console auth. Same JWT, but role must be "admin" (see User.role, admin_service.py's
+# `if actor.role != "admin"` check — that check becomes redundant once routes use this
+# dependency, but is left in place in admin_service.py as defense in depth).
+# ---------------------------------------------------------------------------
+def get_current_admin(
+    creds: HTTPAuthorizationCredentials = Depends(_bearer),
+    db: Session = Depends(get_db),
+) -> User:
+    user = get_current_user(creds, db)
+    if user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+    return user
+
+
+# ---------------------------------------------------------------------------
+# Server-to-server auth for /internal/* routes (Celery workers, ops scripts).
+# Confirmed header name from scripts/e2e_smoke_test.py: "X-Internal-Key".
+# Never exposed to the frontend / end users.
+# ---------------------------------------------------------------------------
+def verify_internal_key(x_internal_key: str = Header(default=None, alias="X-Internal-Key")) -> None:
+    if not settings.INTERNAL_API_KEY or x_internal_key != settings.INTERNAL_API_KEY:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid internal key")
+
+
+# ---------------------------------------------------------------------------
+# Partner ack-webhook auth (hospitals / authorities calling back to acknowledge a
+# dispatched route). B12 — confirmed "referenced, never defined anywhere" in m8-14's own
+# README. No partner-key table exists in any delivered schema, so this is implemented
+# against a per-partner shared-secret header compared to INTERNAL_API_KEY as an interim
+# measure. ⚠️ ASSUMPTION — once you show me Module 2's hospitals/jurisdictions table
+# columns, this should be upgraded to look up a per-partner key (e.g. hospitals.webhook_secret)
+# instead of one shared secret, so a leaked key can be rotated per-partner.
+# ---------------------------------------------------------------------------
+def verify_partner_key(x_partner_key: str = Header(default=None, alias="X-Partner-Key")) -> None:
+    if not settings.INTERNAL_API_KEY or x_partner_key != settings.INTERNAL_API_KEY:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid partner key")
+
+==========================================
+FILE: app\services\safezone_service.py
+==========================================
+import json
+from datetime import datetime
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+from app.core import audit
+
+DEFAULT_WEIGHTS = {"theta1": 0.45, "theta2": 0.25, "theta3": 0.15, "theta4": 0.15}
+WALK_SPEED_MPS = 1.1
+SEARCH_RADIUS_M = 3000
+
+
+def _severity_weight(sev: str) -> float:
+    return {"severe": 1.0, "moderate": 0.6}.get(sev, 0.3)
+
+
+def _find_candidates(db: Session, lat: float, lng: float, beach_id: str | None) -> list[dict]:
+    rows = db.execute(text("""
+        SELECT sz.id AS safe_zone_id, sz.name, sz.elevation_m,
+               ST_Distance(sz.geom::geography, ST_SetSRID(ST_MakePoint(:lng,:lat),4326)::geography) AS distance_m,
+               ST_AsText(ST_ShortestLine(ST_SetSRID(ST_MakePoint(:lng,:lat),4326)::geometry, sz.geom)) AS route_wkt,
+               ST_AsGeoJSON(ST_ShortestLine(ST_SetSRID(ST_MakePoint(:lng,:lat),4326)::geometry, sz.geom)) AS route_geojson
+        FROM safe_zones sz
+        WHERE sz.active = true
+          AND (:beach_id IS NULL OR sz.beach_id = :beach_id)
+          AND ST_DWithin(sz.geom::geography, ST_SetSRID(ST_MakePoint(:lng,:lat),4326)::geography, :radius)
+        ORDER BY distance_m ASC LIMIT 8
+    """), {"lat": lat, "lng": lng, "beach_id": beach_id, "radius": SEARCH_RADIUS_M}).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def _hazard_exposure(db: Session, route_wkt: str) -> tuple[float, list[str]]:
+    rows = db.execute(text("""
+        SELECT id, severity FROM hazard_alerts
+        WHERE status = 'active' AND (valid_to IS NULL OR valid_to > now())
+          AND ST_Intersects(geom, ST_SetSRID(ST_GeomFromText(:wkt), 4326))
+    """), {"wkt": route_wkt}).mappings().all()
+    exposure = sum(_severity_weight(r["severity"]) for r in rows)
+    return exposure, [str(r["id"]) for r in rows]
+
+
+def _crowd_risk(db: Session, route_wkt: str) -> float:
+    # Proxy for crowding: active trip_plans near the destination beach — no dedicated
+    # crowd-density source in schema. Flagged heuristic.
+    row = db.execute(text("""
+        SELECT count(*)::int AS active_count
+        FROM trip_plans tp JOIN beaches b ON b.id = tp.beach_id
+        WHERE tp.status = 'active'
+          AND ST_DWithin(b.geom::geography, ST_SetSRID(ST_GeomFromText(:wkt),4326)::geography, 300)
+    """), {"wkt": route_wkt}).mappings().first()
+    return min(row["active_count"] / 50, 1)
+
+
+def _build_instruction(name: str, eta: float, hazard_types: list[str], exposure: float) -> str:
+    if any(t in ("cyclone", "storm_surge") for t in hazard_types):
+        return f"Move uphill immediately to {name}. Do not enter the water. Estimated time: {eta} min."
+    if exposure > 0:
+        return f"Walk to {name} avoiding the marked hazard area. Estimated time: {eta} min. Keep your phone on."
+    return f"Walk to {name}. Estimated time: {eta} min. Stay on the marked route and away from the water line."
+
+
+def _build_warnings(hazard_types: list[str]) -> list[str]:
+    warnings = []
+    if any(t in ("cyclone", "storm_surge") for t in hazard_types):
+        warnings += ["Do not enter water.", "Stay where you are if uphill movement is not immediately safe, and keep your phone on."]
+    if not hazard_types:
+        warnings.append("Share your live location with your emergency contact.")
+    return warnings
+
+
+def _score_candidate(db: Session, c: dict, weights: dict) -> dict:
+    exposure, hazard_ids = _hazard_exposure(db, c["route_wkt"])
+    crowd_risk = _crowd_risk(db, c["route_wkt"])
+    elevation_gain_m = float(c["elevation_m"] or 0)
+    distance_norm = min(float(c["distance_m"]) / SEARCH_RADIUS_M, 1)
+    elevation_norm = min(elevation_gain_m / 20, 1)
+
+    score = (weights["theta1"] * min(exposure, 1) + weights["theta2"] * distance_norm +
+             weights["theta3"] * elevation_norm + weights["theta4"] * crowd_risk)
+    eta_minutes = round((float(c["distance_m"]) / WALK_SPEED_MPS) / 60 + elevation_gain_m * 0.05, 1)
+
+    return {**c, "hazard_exposure": exposure, "crowd_risk": crowd_risk, "elevation_gain_m": elevation_gain_m,
+            "route_score": round(score, 5), "eta_minutes": eta_minutes, "hazard_alert_ids": hazard_ids}
+
+
+def compute_safezone_guidance(db: Session, user_id: str, lat: float, lng: float, beach_id: str | None = None,
+                               incident_report_id: str | None = None, trip_plan_id: str | None = None,
+                               trigger_reason: str = "initial", weights: dict = DEFAULT_WEIGHTS) -> dict:
+    candidates = _find_candidates(db, lat, lng, beach_id)
+    if not candidates:
+        raise ValueError("NO_SAFE_ZONE_FOUND_IN_RADIUS")
+
+    scored = sorted((_score_candidate(db, c, weights) for c in candidates), key=lambda x: x["route_score"])
+    best = scored[0]
+
+    hazard_types = []
+    if best["hazard_alert_ids"]:
+        rows = db.execute(text("SELECT alert_type FROM hazard_alerts WHERE id = ANY(:ids)"),
+                           {"ids": best["hazard_alert_ids"]}).mappings().all()
+        hazard_types = [r["alert_type"] for r in rows]
+
+    instruction = _build_instruction(best["name"], best["eta_minutes"], hazard_types, best["hazard_exposure"])
+    warnings = _build_warnings(hazard_types)
+
+    if incident_report_id:
+        db.execute(text("""UPDATE safezone_guidance SET superseded = true
+                            WHERE incident_report_id = :irid AND superseded = false"""), {"irid": incident_report_id})
+    elif user_id:
+        db.execute(text("""UPDATE safezone_guidance SET superseded = true
+                            WHERE user_id = :uid AND incident_report_id IS NULL AND superseded = false"""), {"uid": user_id})
+
+    row = db.execute(text("""
+        INSERT INTO safezone_guidance
+          (user_id, incident_report_id, trip_plan_id, origin_geom, safe_zone_id, route_geom,
+           distance_m, elevation_gain_m, hazard_exposure, crowd_risk, route_score, eta_minutes,
+           instruction_text, warnings, hazard_alert_ids, trigger_reason)
+        VALUES (:uid,:irid,:tpid, ST_SetSRID(ST_MakePoint(:lng,:lat),4326), :szid, ST_SetSRID(ST_GeomFromText(:wkt),4326),
+                :dist,:elev,:exp,:crowd,:score,:eta,:instr,:warn,:hids,:reason)
+        RETURNING id, computed_at
+    """), {
+        "uid": user_id, "irid": incident_report_id, "tpid": trip_plan_id, "lng": lng, "lat": lat,
+        "szid": best["safe_zone_id"], "wkt": best["route_wkt"], "dist": best["distance_m"],
+        "elev": best["elevation_gain_m"], "exp": best["hazard_exposure"], "crowd": best["crowd_risk"],
+        "score": best["route_score"], "eta": best["eta_minutes"], "instr": instruction,
+        "warn": json.dumps(warnings), "hids": best["hazard_alert_ids"], "reason": trigger_reason,
+    }).mappings().first()
+    db.commit()
+
+    audit.log_audit_event(db, event_type="safezone.guidance.computed", entity_type="safezone_guidance",
+                     entity_id=str(row["id"]), actor_type="system" if incident_report_id else "user",
+                     actor_id=user_id, payload={"safe_zone_id": best["safe_zone_id"], "route_score": best["route_score"]})
+
+    return {
+        "guidance_id": str(row["id"]), "safe_zone_id": best["safe_zone_id"], "safe_zone_name": best["name"],
+        "route_geojson": json.loads(best["route_geojson"]), "distance_m": best["distance_m"],
+        "eta_minutes": best["eta_minutes"], "route_score": best["route_score"], "instruction": instruction,
+        "warnings": warnings, "hazard_alert_ids": best["hazard_alert_ids"], "computed_at": row["computed_at"],
+        "trigger_reason": trigger_reason,
+    }
+
+
+def recompute_guidance(db: Session, guidance_id: str, lat: float, lng: float, reason: str) -> dict:
+    row = db.execute(text("""SELECT user_id, incident_report_id, trip_plan_id FROM safezone_guidance
+                              WHERE id = :id"""), {"id": guidance_id}).mappings().first()
+    if not row:
+        raise ValueError("GUIDANCE_NOT_FOUND")
+    return compute_safezone_guidance(db, str(row["user_id"]) if row["user_id"] else None, lat, lng,
+                                      incident_report_id=str(row["incident_report_id"]) if row["incident_report_id"] else None,
+                                      trip_plan_id=str(row["trip_plan_id"]) if row["trip_plan_id"] else None,
+                                      trigger_reason=reason)
+
+
+def get_active_guidance(db: Session, user_id: str, incident_report_id: str | None = None) -> dict | None:
+    # Bug fix — previously selected safe_zone_id only, no name. incidents.py's get_incident()
+    # needs safe_zone["safe_zone_name"] (matches compute_safezone_guidance()'s own return shape).
+    # Joined to safe_zones for sz.name.
+    row = db.execute(text("""
+        SELECT sg.id, sg.safe_zone_id, sz.name AS safe_zone_name,
+               ST_AsGeoJSON(sg.route_geom) AS route_geojson, sg.distance_m, sg.eta_minutes,
+               sg.route_score, sg.instruction_text, sg.warnings, sg.hazard_alert_ids, sg.computed_at
+        FROM safezone_guidance sg
+        JOIN safe_zones sz ON sz.id = sg.safe_zone_id
+        WHERE sg.superseded = false
+          AND (:irid::uuid IS NULL OR sg.incident_report_id = :irid)
+          AND (:irid::uuid IS NOT NULL OR sg.user_id = :uid)
+        ORDER BY sg.computed_at DESC LIMIT 1
+    """), {"irid": incident_report_id, "uid": user_id}).mappings().first()
+    return dict(row) if row else None
+
+
+def share_guidance(db: Session, guidance_id: str, actor_user_id: str) -> int:
+    row = db.execute(text("""
+        SELECT sg.user_id, sg.instruction_text, sg.eta_minutes, sg.incident_report_id, sz.name AS safe_zone_name
+        FROM safezone_guidance sg JOIN safe_zones sz ON sz.id = sg.safe_zone_id WHERE sg.id = :id
+    """), {"id": guidance_id}).mappings().first()
+    if not row:
+        raise ValueError("GUIDANCE_NOT_FOUND")
+
+    contacts = db.execute(text("""SELECT name, phone FROM emergency_contacts
+                                   WHERE user_id = :uid ORDER BY priority ASC"""), {"uid": row["user_id"]}).mappings().all()
+    queued = 0
+    for c in contacts:
+        db.execute(text("""
+            INSERT INTO notification_queue (user_id, incident_report_id, type, priority, title, body, channel, status)
+            VALUES (:uid,:irid,'safezone_share','high',:title,:body,'sms','queued')
+        """), {"uid": row["user_id"], "irid": row["incident_report_id"], "title": "Safe zone route shared",
+               "body": f"{row['safe_zone_name']} — {row['instruction_text']} ETA {row['eta_minutes']} min."})
+        queued += 1
+    db.commit()
+
+    audit.log_audit_event(db, event_type="safezone.guidance.shared", entity_type="safezone_guidance",
+                     entity_id=guidance_id, actor_type="user", actor_id=actor_user_id,
+                     payload={"contacts_notified": queued})
+    return queued
+
+
+==========================================
+FILE: app\schemas\offline_sync.py
+==========================================
+# MODULE 16: Offline-First Engineering — Schemas
+# Migrated from Node/Express+TS -> FastAPI+Pydantic to match finalized project stack.
+
+from datetime import datetime
+from typing import Any, Literal, Optional
+
+from pydantic import BaseModel
+
+
+class SyncBundleQuery(BaseModel):
+    beach_ids: list[str] = []
+    last_synced_at: Optional[datetime] = None
+    device_id: str
+
+
+class StampedRecord(BaseModel):
+    data: dict[str, Any]
+    server_version: int
+    cached_at: datetime
+    stale_after_s: int
+
+
+class SyncBundleResponse(BaseModel):
+    synced_at: datetime
+    beach_risk_snapshots: list[StampedRecord] = []
+    trip_plan: Optional[StampedRecord] = None
+    safe_zones: list[StampedRecord] = []
+    emergency_contacts: list[StampedRecord] = []
+    authority_directory: list[StampedRecord] = []
+    hospital_directory: list[StampedRecord] = []
+    alert_summary: Optional[StampedRecord] = None
+
+
+class QueuedSosPacket(BaseModel):
+    client_incident_id: str
+    user_id: str
+    device_id: str
+    created_at_client: datetime
+    lat: float
+    lng: float
+    accuracy_m: Optional[float] = None
+    source_of_location: Literal["gps", "network", "last_known"]
+    beach_id: Optional[str] = None
+    activity_type: Optional[str] = None
+    incident_type: str
+    severity: str
+    media_refs: list[str] = []
+    battery_pct: Optional[int] = None
+    signal_strength: Optional[str] = None
+    offline_flag: Literal[True] = True
+
+
+class OfflineSosSyncRequest(BaseModel):
+    device_id: str
+    packets: list[QueuedSosPacket]
+
+
+class OfflineSosSyncResult(BaseModel):
+    client_incident_id: str
+    status: Literal["accepted", "duplicate", "rejected"]
+    server_incident_id: Optional[str] = None
+    reason: Optional[str] = None
+
+
+class OfflineSosSyncResponse(BaseModel):
+    results: list[OfflineSosSyncResult]
+
+
+==========================================
+FILE: app\schemas\sos.py
+==========================================
+from typing import Literal
+from pydantic import BaseModel
+
+TriggerType = Literal["manual_button", "long_press", "shake", "voice", "wearable",
+                       "auto_hazard", "auto_inactivity", "auto_motion_anomaly", "auto_severe_escalation"]
+
+
+class SosCreateInput(BaseModel):
+    lat: float
+    lng: float
+    accuracy_m: float | None = None
+    location_source: Literal["gps", "network", "last_known"] = "gps"
+    beach_id: str | None = None
+    activity_type: str | None = None
+    incident_type: str
+    severity: Literal["mild", "moderate", "severe"]
+    description: str | None = None
+    media_urls: list[str] = []
+    battery_pct: int | None = None
+    signal_strength: str | None = None
+    offline_flag: bool = False
+    trigger_type: TriggerType
+
+
+==========================================
+FILE: app\core\dispatch_states.py
+==========================================
+"""
+Module 27 — Dispatch State Machine: canonical states, transition graph, event names.
+No other module may hardcode incident status strings — import from here.
+"""
+from enum import Enum
+
+
+class IncidentState(str, Enum):
+    CREATED = "created"
+    VALIDATED = "validated"
+    LOCATION_LOCKED = "location_locked"
+    PACKED = "packed"
+    DISPATCHED = "dispatched"
+    ACKNOWLEDGED = "acknowledged"
+    ROUTED = "routed"
+    EN_ROUTE = "en_route"
+    HOSPITAL_NOTIFIED = "hospital_notified"
+    SAFE_ZONE_SHARED = "safe_zone_shared"
+    RESOLVED = "resolved"
+    CLOSED = "closed"
+    # failure branch
+    TIMEOUT = "timeout"
+    ESCALATED = "escalated"
+    FALLBACK_112 = "fallback_112"
+    MANUAL_OPS = "manual_ops"
+
+
+class DispatchEvent(str, Enum):
+    SOS_TRIGGERED = "sos.triggered"
+    INCIDENT_CREATED = "incident.created"
+    LOCATION_LOCKED = "incident.location.locked"
+    PACKET_BUILT = "incident.packet.built"
+    DISPATCHED = "incident.dispatched"
+    AUTHORITY_ACK = "authority.ack.received"
+    HOSPITAL_ACK = "hospital.ack.received"
+    SAFEZONE_SHARED = "safezone.shared"
+    NOTIFICATION_SENT = "notification.sent"
+    ESCALATION_TIMEOUT = "escalation.timeout"
+    INCIDENT_CLOSED = "incident.closed"
+
+
+# Main happy-path flow (strict order, no skipping)
+MAIN_FLOW = [
+    IncidentState.CREATED,
+    IncidentState.VALIDATED,
+    IncidentState.LOCATION_LOCKED,
+    IncidentState.PACKED,
+    IncidentState.DISPATCHED,
+    IncidentState.ACKNOWLEDGED,
+    IncidentState.ROUTED,
+    IncidentState.EN_ROUTE,
+    IncidentState.HOSPITAL_NOTIFIED,
+    IncidentState.SAFE_ZONE_SHARED,
+    IncidentState.RESOLVED,
+    IncidentState.CLOSED,
+]
+
+# Allowed transitions: from_state -> set(to_states)
+TRANSITIONS: dict[IncidentState, set[IncidentState]] = {
+    IncidentState.CREATED: {IncidentState.VALIDATED},
+    IncidentState.VALIDATED: {IncidentState.LOCATION_LOCKED},
+    IncidentState.LOCATION_LOCKED: {IncidentState.PACKED},
+    IncidentState.PACKED: {IncidentState.DISPATCHED},
+    IncidentState.DISPATCHED: {
+        IncidentState.ACKNOWLEDGED,
+        IncidentState.TIMEOUT,  # ack failure branch
+    },
+    IncidentState.ACKNOWLEDGED: {IncidentState.ROUTED},
+    IncidentState.ROUTED: {IncidentState.EN_ROUTE},
+    IncidentState.EN_ROUTE: {IncidentState.HOSPITAL_NOTIFIED},
+    IncidentState.HOSPITAL_NOTIFIED: {IncidentState.SAFE_ZONE_SHARED},
+    IncidentState.SAFE_ZONE_SHARED: {IncidentState.RESOLVED},
+    IncidentState.RESOLVED: {IncidentState.CLOSED},
+    IncidentState.CLOSED: set(),
+    # failure/escalation branch
+    IncidentState.TIMEOUT: {IncidentState.ESCALATED},
+    IncidentState.ESCALATED: {IncidentState.FALLBACK_112},
+    IncidentState.FALLBACK_112: {IncidentState.MANUAL_OPS},
+    # manual_ops is a terminal-ish holding state; ops can force back into flow
+    IncidentState.MANUAL_OPS: {
+        IncidentState.DISPATCHED,   # re-dispatch after manual intervention
+        IncidentState.ACKNOWLEDGED,  # ops manually confirms ack
+        IncidentState.CLOSED,        # ops force-closes
+    },
+}
+
+# States after which the incident is considered terminal (workers/schedulers stop polling)
+TERMINAL_STATES = {IncidentState.CLOSED}
+
+# Ack-required states: entering these starts an escalation timer (Module 26 escalation_worker)
+ACK_TIMEOUT_STATES = {IncidentState.DISPATCHED}
+
+# Default ack timeout in seconds per escalation stage (dispatched -> timeout -> escalated -> fallback_112)
+ACK_TIMEOUT_SECONDS = 90
+ESCALATION_TIMEOUT_SECONDS = 120
+FALLBACK_TIMEOUT_SECONDS = 180
+
+
+class InvalidTransitionError(Exception):
+    def __init__(self, from_state: IncidentState, to_state: IncidentState):
+        self.from_state = from_state
+        self.to_state = to_state
+        super().__init__(
+            f"Invalid dispatch transition: {from_state.value} -> {to_state.value}"
+        )
+
+
+def is_valid_transition(from_state: IncidentState, to_state: IncidentState) -> bool:
+    return to_state in TRANSITIONS.get(from_state, set())
+
+
+def is_terminal(state: IncidentState) -> bool:
+    return state in TERMINAL_STATES
+
+
+==========================================
+FILE: app\main.py
+==========================================
+"""
+app/main.py
+
+Router wiring verified against the ACTUAL router objects in every copied file (not assumed
+from the original planning doc â€” several prefixes there were wrong; see notes inline).
+
+Key corrections made after inspecting real code:
+  1. Most routers (trips, incidents, emergency_share, notifications, admin, offline_sync,
+     beach, internal, internal_dispatch) already bake "/v1" or "/internal" into their OWN
+     `APIRouter(prefix=...)` call. Adding prefix="/v1" again at include_router() here would
+     double it to "/v1/v1/...". These are mounted with NO extra prefix.
+  2. safezone.py and tracking.py do NOT self-prefix with /v1 (only "/safezone", "/tracking")
+     â€” these genuinely need prefix="/v1" added here.
+  3. hospital_router.py and authority_router.py have fully absolute paths hardcoded into
+     their route decorators (e.g. "/internal/hospital-router/dispatch" and
+     "/hospital-router/routes/{id}/ack") with NO router-level prefix at all. They must be
+     mounted with prefix="" (root) or their paths break.
+  4. incidents.py exports TWO routers (sos_router, incidents_router), not one `router`.
+  5. admin.py (Module 20-26 version) exports TWO routers in one file: `admin_router`
+     (CRUD, superseded by Module 17's richer version per B11) and `auth_router` (OTP,
+     genuinely new, always needed). Only `auth_router` is imported here.
+  6. audit.py self-prefixes at "/v1/admin/analytics" â€” mounted with no extra prefix.
+"""
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.api import authority_router, hospital_router, safezone, tracking, health
+from app.api.v1 import (
+    offline_sync, admin, audit, beach, trips, incidents,
+    emergency_share, notifications, internal, auth_router as auth_router_module,
+)
+from app.api import internal_dispatch
+
+app = FastAPI(title="WaveSafe â€” Coastal Tourism Safety Platform")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# --- Self-prefixed routers: mount as-is, no extra prefix ---
+app.include_router(beach.router)                        # already "/v1"
+app.include_router(trips.router)                         # already "/v1/trips"
+app.include_router(incidents.sos_router)                 # already "/v1/sos"
+app.include_router(incidents.incidents_router)            # already "/v1/incidents"
+app.include_router(emergency_share.router)                # already "/v1/emergency/share"
+app.include_router(notifications.router)                  # already "/v1/notifications"
+app.include_router(offline_sync.router)                   # already "/v1/sync"
+app.include_router(admin.router)                          # Module 17 version â€” already "/v1/admin"
+app.include_router(auth_router_module.auth_router)         # extracted OTP router â€” "/v1/auth" (B11)
+app.include_router(audit.router)                          # already "/v1/admin/analytics"
+app.include_router(internal.router)                       # already "/internal", verify_internal_key baked in
+app.include_router(internal_dispatch.router)               # already "/internal/router"
+
+# --- Routers needing "/v1" added (they don't self-prefix with it) ---
+app.include_router(safezone.router, prefix="/v1")          # "/safezone" -> "/v1/safezone"
+app.include_router(tracking.router, prefix="/v1")           # "/tracking" -> "/v1/tracking"
+
+# --- Routers with fully absolute hardcoded paths: mount at root, no prefix at all ---
+app.include_router(authority_router.router)                 # "/internal/authority-router/..." + "/authority-router/..."
+app.include_router(hospital_router.router)                   # "/internal/hospital-router/..." + "/hospital-router/..."
+
+# --- Health check, no prefix (routes are "/healthz", "/readyz") ---
+app.include_router(health.router)
+
+==========================================
+FILE: check_imports.py
+==========================================
+"""
+check_imports.py — run this from backend/ folder: python check_imports.py
+
+Scans every .py file under app/, tries to actually import it, and reports EVERY
+broken import across the whole codebase in one pass — instead of finding them
+one at a time via uvicorn restarts.
+
+Usage:
+    cd backend
+    python check_imports.py
+
+Output: a list of every file that fails to import, with the exact error, sorted
+by folder so you can batch-fix related files together.
+"""
+import importlib
+import sys
+import traceback
+from pathlib import Path
+
+APP_ROOT = Path(__file__).resolve().parent / "app"
+FAILURES = []
+CHECKED = 0
+
+for py_file in sorted(APP_ROOT.rglob("*.py")):
+    if "__pycache__" in str(py_file):
+        continue
+    if py_file.name == "__init__.py":
+        continue
+
+    rel = py_file.relative_to(APP_ROOT.parent)
+    module_name = str(rel.with_suffix("")).replace("\\", ".").replace("/", ".")
+
+    CHECKED += 1
+    try:
+        if module_name in sys.modules:
+            del sys.modules[module_name]
+        importlib.import_module(module_name)
+    except Exception as e:
+        FAILURES.append((module_name, f"{type(e).__name__}: {e}"))
+
+print(f"\nChecked {CHECKED} files.\n")
+
+if not FAILURES:
+    print("✅ ALL FILES IMPORT CLEANLY.")
+else:
+    print(f"❌ {len(FAILURES)} FILES FAILED TO IMPORT:\n")
+    for mod, err in FAILURES:
+        print(f"  {mod}\n      -> {err}\n")
+
+==========================================
+FILE: app\db\migrations\013b_notification_templates.sql
+==========================================
+CREATE TABLE IF NOT EXISTS notification_templates (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  template_key text NOT NULL,
+  locale text NOT NULL,
+  title_template text NOT NULL,
+  body_template text NOT NULL,
+  UNIQUE(template_key, locale)
+);
+
+INSERT INTO notification_templates (template_key, locale, title_template, body_template) VALUES
+('hazard_critical', 'en', 'Danger near {{beach_name}}', 'Danger near {{beach_name}}. Move to safe zone now. Help has been alerted. Live location shared.'),
+('hazard_critical', 'hi', '{{beach_name}} ke paas khatra', '{{beach_name}} ke paas khatra hai. Turant safe zone ki taraf jaayein. Madad ko soochit kar diya gaya hai.'),
+('sos_ack', 'en', 'Help is on the way', 'Your SOS was received. {{responder_name}} is en route. ETA {{eta_minutes}} min.'),
+('contact_fanout_start', 'en', 'Emergency: {{contact_name}} needs help', 'Emergency near beach. {{instruction}} Live location: {{map_link}}'),
+('contact_fanout_update', 'en', 'Rescue update', 'Status: {{status}}. Authority ack: {{ack}}. Live location updated.'),
+('contact_fanout_stop', 'en', 'Situation resolved', 'The emergency has been marked {{reason}}. Live sharing has stopped.'),
+('manual_ops_required', 'en', 'Manual intervention required', 'Incident {{incident_id}} unacknowledged through 112 fallback. Operator action required now.')
+ON CONFLICT (template_key, locale) DO NOTHING;
+
+
+==========================================
+FILE: app\db\migrations\013_notification_queue_columns.sql
+==========================================
+-- Module 13 canonical rewrite — matches ORM model app/models/notification.py
+ALTER TABLE notification_queue
+  ADD COLUMN IF NOT EXISTS delivery_meta jsonb NOT NULL DEFAULT '{}'::jsonb,
+  ADD COLUMN IF NOT EXISTS locale text NOT NULL DEFAULT 'en',
+  ADD COLUMN IF NOT EXISTS full_screen boolean NOT NULL DEFAULT false;
+
+-- notification_queue.read_at assumed to already exist (Module 23).
+
+
+==========================================
+FILE: app\db\migrations\014_otp_codes.sql
+==========================================
+-- 014_otp_codes.sql
+-- otp_codes: matches app/models/otp.py's OTPCode model exactly.
+-- Missing from the original Module 2A-2D migrations (model was added later for
+-- POST /v1/auth/otp/* but the corresponding migration was never written).
+
+CREATE TABLE IF NOT EXISTS otp_codes (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    phone TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    expires_at TIMESTAMPTZ NOT NULL,
+    consumed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_otp_codes_phone ON otp_codes (phone);
+
+
