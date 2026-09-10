@@ -1,0 +1,15 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Kamarajar Salai Roadside Safe Zone (Marina Beach)",
+        "beach_id": "e5afce33-9d88-45cf-b2a7-6d5257a262d4",
+        "elevation_m": 5,
+        "route_notes": "Elevated road, away from waterline; default demo zone, verify with local disaster authority before production use"
+      },
+      "geometry": {"type": "Polygon", "coordinates": [[[80.2810,13.0455],[80.2820,13.0455],[80.2820,13.0465],[80.2810,13.0465],[80.2810,13.0455]]]}
+    }
+  ]
+}
