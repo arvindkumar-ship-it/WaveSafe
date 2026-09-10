@@ -1,0 +1,14 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Marina Beach Lifeguard Post (near Lighthouse)",
+        "post_type": "lifeguard",
+        "contact_phone": ""
+      },
+      "geometry": {"type": "Point", "coordinates": [80.2825, 13.0508]}
+    }
+  ]
+}
