@@ -1,0 +1,19 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "REPLACE_BEACH_NAME",
+        "state": "REPLACE_STATE",
+        "district": "REPLACE_DISTRICT",
+        "coast_region": "REPLACE_REGION",
+        "has_lifeguard": true
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[0,0],[0,0],[0,0],[0,0]]]
+      }
+    }
+  ]
+}
