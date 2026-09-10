@@ -1,0 +1,3538 @@
+==========================================
+FILE: app\models\base.py
+==========================================
+"""Module 2 — Database Schema: declarative base + shared mixins."""
+from __future__ import annotations
+import uuid
+from datetime import datetime, timezone
+
+from sqlalchemy import Column, DateTime
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+
+def uuid_pk():
+    return Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+
+class TimestampMixin:
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False,
+                         default=lambda: datetime.now(timezone.utc),
+                         onupdate=lambda: datetime.now(timezone.utc))
+
+
+==========================================
+FILE: app\models\tracking.py
+==========================================
+import uuid
+from sqlalchemy import Column, ForeignKey, String, Integer, Numeric, DateTime, func
+from sqlalchemy.dialects.postgresql import UUID
+from geoalchemy2 import Geometry
+from app.core.db import Base
+
+
+class LiveTrackingSession(Base):
+    __tablename__ = "live_tracking_sessions"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    incident_report_id = Column(UUID(as_uuid=True), ForeignKey("incident_reports.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    status = Column(String, nullable=False, default="awaiting_acknowledgment")
+    tracking_mode = Column(String, nullable=False, default="critical")
+    started_at = Column(DateTime(timezone=True), server_default=func.now())
+    last_ping_at = Column(DateTime(timezone=True), nullable=True)
+    ended_at = Column(DateTime(timezone=True), nullable=True)
+    end_reason = Column(String, nullable=True)
+
+
+class LocationPing(Base):
+    __tablename__ = "location_pings"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    session_id = Column(UUID(as_uuid=True), ForeignKey("live_tracking_sessions.id", ondelete="CASCADE"), nullable=False)
+    geom = Column(Geometry(geometry_type="POINT", srid=4326), nullable=False)
+    accuracy_m = Column(Numeric(8, 2))
+    speed_mps = Column(Numeric(8, 3))
+    heading = Column(Numeric(6, 2))
+    battery_pct = Column(Integer)
+    signal_strength = Column(String)
+    source = Column(String, nullable=False, default="gps")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+==========================================
+FILE: app\models\safezone.py
+==========================================
+import uuid
+from sqlalchemy import Column, ForeignKey, Numeric, String, Boolean, DateTime, func, ARRAY
+from sqlalchemy.dialects.postgresql import UUID, JSONB
+from geoalchemy2 import Geometry
+from app.core.db import Base
+
+
+class SafeZoneGuidance(Base):
+    __tablename__ = "safezone_guidance"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    incident_report_id = Column(UUID(as_uuid=True), ForeignKey("incident_reports.id", ondelete="CASCADE"), nullable=True)
+    trip_plan_id = Column(UUID(as_uuid=True), ForeignKey("trip_plans.id", ondelete="SET NULL"), nullable=True)
+    origin_geom = Column(Geometry(geometry_type="POINT", srid=4326), nullable=False)
+    safe_zone_id = Column(UUID(as_uuid=True), ForeignKey("safe_zones.id"), nullable=False)
+    route_geom = Column(Geometry(geometry_type="LINESTRING", srid=4326), nullable=False)
+    distance_m = Column(Numeric(10, 2), nullable=False)
+    elevation_gain_m = Column(Numeric(8, 2))
+    hazard_exposure = Column(Numeric(6, 3), nullable=False, default=0)
+    crowd_risk = Column(Numeric(6, 3), nullable=False, default=0)
+    route_score = Column(Numeric(8, 5), nullable=False)
+    eta_minutes = Column(Numeric(6, 2), nullable=False)
+    instruction_text = Column(String, nullable=False)
+    warnings = Column(JSONB, nullable=False, default=list)
+    hazard_alert_ids = Column(ARRAY(UUID(as_uuid=True)), nullable=False, default=list)
+    trigger_reason = Column(String, nullable=False, default="initial")
+    superseded = Column(Boolean, nullable=False, default=False)
+    computed_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+==========================================
+FILE: app\models\emergency_share.py
+==========================================
+"""Module 22 dependency. emergency_contacts already exists (Module 2A); this adds only the
+session/target tables needed to persist live-share state, following the same schema conventions."""
+from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, func
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import relationship
+
+from app.core.db import Base
+
+
+class ShareStatus:
+    ACTIVE = "active"
+    STOPPED = "stopped"
+
+
+class EmergencyShareSession(Base):
+    __tablename__ = "emergency_share_sessions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    incident_report_id = Column(UUID(as_uuid=True), ForeignKey("incident_reports.id", ondelete="CASCADE"),
+                                 nullable=False, index=True)
+    share_live_location = Column(Boolean, nullable=False, server_default="true")
+    share_route = Column(Boolean, nullable=False, server_default="true")
+    status = Column(String, nullable=False, server_default=ShareStatus.ACTIVE)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    stopped_at = Column(DateTime(timezone=True))
+
+    targets = relationship("EmergencyShareTarget", back_populates="session", cascade="all, delete-orphan")
+
+
+class EmergencyShareTarget(Base):
+    __tablename__ = "emergency_share_targets"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    share_session_id = Column(UUID(as_uuid=True), ForeignKey("emergency_share_sessions.id", ondelete="CASCADE"),
+                               nullable=False, index=True)
+    contact_id = Column(UUID(as_uuid=True), ForeignKey("emergency_contacts.id"), nullable=False)
+    status = Column(String, nullable=False, server_default="sent")  # sent|failed
+    last_error = Column(String)
+
+    session = relationship("EmergencyShareSession", back_populates="targets")
+
+
+==========================================
+FILE: app\models\otp.py
+==========================================
+"""otp_codes: minimal addition to support POST /v1/auth/otp/* — no such table existed in
+Module 2A-2D; everything else here (hospitals, jurisdictions, beaches, safe_zones,
+beach_activity_profiles) reuses the exact models already built in Module 1/2B/2C."""
+from sqlalchemy import Column, String, DateTime, Integer, func
+from sqlalchemy.dialects.postgresql import UUID
+
+from app.core.db import Base
+
+
+class OTPCode(Base):
+    __tablename__ = "otp_codes"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    phone = Column(String, nullable=False, index=True)
+    code_hash = Column(String, nullable=False)
+    attempts = Column(Integer, nullable=False, server_default="0")
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    consumed_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+==========================================
+FILE: app\models\__init__.py
+==========================================
+"""Module 2 — models/__init__.py : the file your screenshot was validating
+against the live DB. Aggregates all tables (2A-2D) under one Base/metadata
+so Alembic autogenerate and `Base.metadata.create_all()` both see everything."""
+from .base import Base
+from .core import User, UserDevice, EmergencyContact
+from .geospatial import Beach, SafeZone, Jurisdiction, Hospital, RescuePost
+from .forecast_risk import (
+    BeachActivityProfile, BeachForecast, HazardAlert, BeachRiskScore,
+    TripPlan, TripRiskSnapshot,
+)
+
+from .incident import (
+    IncidentReport, IncidentRoute, IncidentStatusHistory, NotificationQueue,
+    AuditEvent, UserContact, OfflineSyncQueue,
+)
+__all__ = [
+    "Base",
+    "User", "UserDevice", "EmergencyContact",
+    "Beach", "SafeZone", "Jurisdiction", "Hospital", "RescuePost",
+    "BeachActivityProfile", "BeachForecast", "HazardAlert", "BeachRiskScore",
+    "TripPlan", "TripRiskSnapshot",
+    "IncidentReport", "IncidentRoute", "IncidentStatusHistory", "NotificationQueue",
+    "AuditEvent", "UserContact", "OfflineSyncQueue",
+]
+
+
+==========================================
+FILE: app\core\db.py
+==========================================
+"""Module 2 â€” Database Schema: engine + session.
+
+FIX APPLIED: load_dotenv() with no path argument searches upward from the current
+WORKING DIRECTORY (CWD), not from this file's location. Depending on where uvicorn/celery
+is launched from (backend/ vs repo root vs elsewhere), it may never find wavesafe/.env â€”
+this is exactly the blocker you hit. Fixed by resolving the path explicitly relative to
+this file, so it works identically no matter where the process is started from.
+"""
+from __future__ import annotations
+import os
+from contextlib import contextmanager
+from pathlib import Path
+from dotenv import load_dotenv
+
+# This file: backend/app/core/db.py
+# parents[0]=core, [1]=app, [2]=backend, [3]=repo root (wavesafe/) â€” where .env actually lives
+_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+load_dotenv(dotenv_path=_ENV_PATH, override=True)
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql+psycopg2://user:pass@localhost:5433/coastal_safety",
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_size=10, max_overflow=20)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+
+@contextmanager
+def get_session() -> Session:
+    session = SessionLocal()
+    try:
+        yield session
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def get_db():
+    """FastAPI dependency â€” used via Depends(get_db) in routers."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+==========================================
+FILE: app\db\migrations\001_extensions_and_tables.sql
+==========================================
+-- Module 2 — exact schema from spec, source of truth (apply before ORM use,
+-- or use as the Alembic initial revision body).
+
+CREATE EXTENSION IF NOT EXISTS postgis;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS btree_gist;
+
+-- ===== Module 2A: Core master tables =====
+CREATE TABLE users (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  phone text UNIQUE,
+  email text UNIQUE,
+  name text,
+  preferred_language text DEFAULT 'en',
+  consent_location boolean DEFAULT false,
+  consent_emergency_share boolean DEFAULT false,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE user_devices (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  platform text NOT NULL,
+  device_token text NOT NULL,
+  push_enabled boolean DEFAULT true,
+  sms_enabled boolean DEFAULT true,
+  last_seen_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_user_devices_user_id ON user_devices(user_id);
+
+CREATE TABLE emergency_contacts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name text NOT NULL,
+  phone text NOT NULL,
+  relation text,
+  priority int DEFAULT 1,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- ===== Module 2B: Geospatial tables =====
+CREATE TABLE beaches (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name text NOT NULL,
+  state text NOT NULL,
+  district text,
+  coast_region text,
+  geom geometry(Polygon, 4326) NOT NULL,
+  centroid geometry(Point, 4326),
+  has_lifeguard boolean DEFAULT false,
+  public_access boolean DEFAULT true,
+  active boolean DEFAULT true,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_beaches_geom ON beaches USING gist(geom);
+CREATE INDEX idx_beaches_name ON beaches(name);
+
+CREATE TABLE safe_zones (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  beach_id uuid REFERENCES beaches(id) ON DELETE SET NULL,
+  name text NOT NULL,
+  geom geometry(Polygon, 4326) NOT NULL,
+  elevation_m numeric(8,2),
+  route_notes text,
+  active boolean DEFAULT true,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_safe_zones_geom ON safe_zones USING gist(geom);
+
+CREATE TABLE jurisdictions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name text NOT NULL,
+  authority_type text NOT NULL,
+  contact_phone text,
+  contact_email text,
+  service_area_geom geometry(MultiPolygon, 4326) NOT NULL,
+  escalation_level int DEFAULT 1,
+  active boolean DEFAULT true,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_jurisdictions_geom ON jurisdictions USING gist(service_area_geom);
+
+CREATE TABLE hospitals (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name text NOT NULL,
+  type text NOT NULL,
+  geom geometry(Point, 4326) NOT NULL,
+  contact_phone text,
+  contact_email text,
+  capabilities jsonb NOT NULL DEFAULT '{}'::jsonb,
+  capacity_status text DEFAULT 'unknown',
+  active boolean DEFAULT true,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_hospitals_geom ON hospitals USING gist(geom);
+
+CREATE TABLE rescue_posts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name text NOT NULL,
+  post_type text NOT NULL,
+  geom geometry(Point, 4326) NOT NULL,
+  contact_phone text,
+  active boolean DEFAULT true,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_rescue_posts_geom ON rescue_posts USING gist(geom);
+
+-- ===== Module 2C: Forecast & risk tables =====
+CREATE TABLE beach_activity_profiles (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  beach_id uuid NOT NULL REFERENCES beaches(id) ON DELETE CASCADE,
+  activity_type text NOT NULL,
+  min_safe_wave_height numeric(8,3),
+  max_safe_current_speed numeric(8,3),
+  max_safe_wind_speed numeric(8,3),
+  max_safe_swell numeric(8,3),
+  water_quality_min numeric(8,3),
+  tide_sensitivity numeric(8,3),
+  risk_weights jsonb NOT NULL DEFAULT '{}'::jsonb,
+  active boolean DEFAULT true,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX uniq_beach_activity ON beach_activity_profiles(beach_id, activity_type);
+
+CREATE TABLE beach_forecasts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  beach_id uuid NOT NULL REFERENCES beaches(id) ON DELETE CASCADE,
+  forecast_time timestamptz NOT NULL,
+  wave_height numeric(8,3),
+  current_speed numeric(8,3),
+  wind_speed numeric(8,3),
+  swell_height numeric(8,3),
+  tide_state text,
+  rainfall numeric(8,3),
+  visibility numeric(8,3),
+  water_quality numeric(8,3),
+  source text NOT NULL,
+  raw_payload jsonb,
+  ingested_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_beach_forecasts_beach_time ON beach_forecasts(beach_id, forecast_time);
+
+CREATE TABLE hazard_alerts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  source_system text NOT NULL,
+  source_alert_id text,
+  alert_type text NOT NULL,
+  severity text NOT NULL,
+  title text,
+  description text,
+  geom geometry(MultiPolygon, 4326),
+  issued_at timestamptz NOT NULL,
+  valid_from timestamptz,
+  valid_to timestamptz,
+  eta_minutes int,
+  hard_override_flag boolean DEFAULT false,
+  raw_payload jsonb,
+  status text DEFAULT 'active',
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_hazard_alerts_geom ON hazard_alerts USING gist(geom);
+CREATE INDEX idx_hazard_alerts_validity ON hazard_alerts(valid_from, valid_to);
+
+CREATE TABLE beach_risk_scores (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  beach_id uuid NOT NULL REFERENCES beaches(id) ON DELETE CASCADE,
+  activity_type text NOT NULL,
+  forecast_time timestamptz NOT NULL,
+  computed_at timestamptz NOT NULL DEFAULT now(),
+  risk_score numeric(8,5) NOT NULL,
+  verdict text NOT NULL,
+  explanation jsonb NOT NULL DEFAULT '{}'::jsonb,
+  hard_override_reason text,
+  version int NOT NULL DEFAULT 1
+);
+CREATE INDEX idx_risk_scores_lookup ON beach_risk_scores(beach_id, activity_type, forecast_time DESC);
+
+CREATE TABLE trip_plans (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  beach_id uuid NOT NULL REFERENCES beaches(id),
+  activity_type text NOT NULL,
+  planned_from timestamptz NOT NULL,
+  planned_to timestamptz NOT NULL,
+  status text NOT NULL DEFAULT 'active',
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_trip_plans_user ON trip_plans(user_id);
+
+CREATE TABLE trip_risk_snapshots (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  trip_plan_id uuid NOT NULL REFERENCES trip_plans(id) ON DELETE CASCADE,
+  computed_at timestamptz NOT NULL DEFAULT now(),
+  min_risk numeric(8,5),
+  max_risk numeric(8,5),
+  recommendation text,
+  safe_window_start timestamptz,
+  safe_window_end timestamptz,
+  explanation jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+
+-- ===== Module 2D: Incident, notification & audit tables =====
+CREATE TABLE incident_reports (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid REFERENCES users(id) ON DELETE SET NULL,
+  beach_id uuid REFERENCES beaches(id) ON DELETE SET NULL,
+  incident_type text NOT NULL,
+  severity text NOT NULL,
+  lat numeric(10,7) NOT NULL,
+  lng numeric(10,7) NOT NULL,
+  geom geometry(Point, 4326) GENERATED ALWAYS AS (
+    ST_SetSRID(ST_MakePoint(lng, lat), 4326)
+  ) STORED,
+  description text,
+  media jsonb NOT NULL DEFAULT '[]'::jsonb,
+  status text NOT NULL DEFAULT 'created',
+  trigger_type text NOT NULL,
+  battery_pct int,
+  signal_strength text,
+  current_hazard_context jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_incidents_geom ON incident_reports USING gist(geom);
+CREATE INDEX idx_incidents_status ON incident_reports(status);
+
+CREATE TABLE incident_routes (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  incident_report_id uuid NOT NULL REFERENCES incident_reports(id) ON DELETE CASCADE,
+  target_type text NOT NULL,
+  target_name text NOT NULL,
+  target_id uuid,
+  jurisdiction_id uuid REFERENCES jurisdictions(id),
+  route_rank int NOT NULL,
+  routed_at timestamptz NOT NULL DEFAULT now(),
+  ack_status text NOT NULL DEFAULT 'sent',
+  ack_time timestamptz,
+  external_ref text,
+  last_error text
+);
+CREATE INDEX idx_incident_routes_incident ON incident_routes(incident_report_id);
+
+CREATE TABLE incident_status_history (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  incident_report_id uuid NOT NULL REFERENCES incident_reports(id) ON DELETE CASCADE,
+  from_status text,
+  to_status text NOT NULL,
+  reason text,
+  changed_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE notification_queue (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid REFERENCES users(id) ON DELETE SET NULL,
+  incident_report_id uuid REFERENCES incident_reports(id) ON DELETE SET NULL,
+  type text NOT NULL,
+  priority text NOT NULL,
+  title text NOT NULL,
+  body text NOT NULL,
+  channel text NOT NULL,
+  status text NOT NULL DEFAULT 'queued',
+  scheduled_for timestamptz NOT NULL DEFAULT now(),
+  sent_at timestamptz,
+  delivery_meta jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+CREATE INDEX idx_notification_queue_status ON notification_queue(status, scheduled_for);
+
+CREATE TABLE audit_events (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  event_type text NOT NULL,
+  entity_type text NOT NULL,
+  entity_id uuid,
+  actor_type text NOT NULL,
+  actor_id uuid,
+  payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_audit_events_entity ON audit_events(entity_type, entity_id);
+
+CREATE TABLE user_contacts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name text NOT NULL,
+  phone text NOT NULL,
+  relation text,
+  priority int DEFAULT 1,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE offline_sync_queue (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid REFERENCES users(id) ON DELETE SET NULL,
+  entity_type text NOT NULL,
+  entity_id uuid,
+  action_type text NOT NULL,
+  payload jsonb NOT NULL,
+  status text DEFAULT 'pending',
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+
+==========================================
+FILE: app\api\v1\admin.py
+==========================================
+# MODULE 17: Admin Console — API Router
+# Mounted at /v1/admin. All routes require ops-or-above (get_current_admin); risk-rule
+# tuning and log export additionally require admin role (enforced in admin_service).
+
+from fastapi import APIRouter, Depends, Response
+from sqlalchemy.orm import Session
+
+from app.core.db import get_db
+from app.core.security import get_current_admin
+from app.schemas.admin import (
+    BeachUpsertInput,
+    ActivityThresholdInput,
+    JurisdictionUpsertInput,
+    HospitalUpsertInput,
+    IncidentReviewFilters,
+    RiskRuleUpdateInput,
+    LogExportRequest,
+)
+from app.services import admin_service as svc
+
+router = APIRouter(prefix="/v1/admin", tags=["admin"], dependencies=[Depends(get_current_admin)])
+
+
+# Step 1-2: beaches + polygon upload
+@router.post("/beaches")
+def post_beach(
+    body: BeachUpsertInput, admin=Depends(get_current_admin), db: Session = Depends(get_db)
+):
+    return svc.upsert_beach(db, admin, body)
+
+
+@router.get("/beaches/{beach_id}/validate-geometry")
+def get_beach_validation(beach_id: str, db: Session = Depends(get_db)):
+    return svc.validate_beach_geometry(db, beach_id)
+
+
+# Step 3: activity thresholds
+@router.post("/activity-thresholds")
+def post_activity_threshold(
+    body: ActivityThresholdInput,
+    admin=Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    return svc.upsert_activity_threshold(db, admin, body)
+
+
+# Step 4: jurisdictions
+@router.post("/jurisdictions")
+def post_jurisdiction(
+    body: JurisdictionUpsertInput,
+    admin=Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    return svc.upsert_jurisdiction(db, admin, body)
+
+
+# Step 5: hospitals
+@router.post("/hospitals")
+def post_hospital(
+    body: HospitalUpsertInput, admin=Depends(get_current_admin), db: Session = Depends(get_db)
+):
+    return svc.upsert_hospital(db, admin, body)
+
+
+# Step 6: incident review
+@router.get("/incidents")
+def get_incidents(
+    status: str | None = None,
+    incident_type: str | None = None,
+    beach_id: str | None = None,
+    from_: str | None = None,
+    to: str | None = None,
+    page: int = 1,
+    page_size: int = 25,
+    db: Session = Depends(get_db),
+):
+    filters = IncidentReviewFilters(
+        status=status,
+        incident_type=incident_type,
+        beach_id=beach_id,
+        from_=from_,
+        to=to,
+        page=page,
+        page_size=page_size,
+    )
+    return svc.list_incidents(db, filters)
+
+
+# Step 7: acknowledgement review
+@router.get("/incidents/{incident_id}/acknowledgements")
+def get_acknowledgements(incident_id: str, db: Session = Depends(get_db)):
+    rows = svc.list_acknowledgements(db, incident_id)
+    return {"rows": rows}
+
+
+# Step 8: response latency
+@router.get("/metrics/response-latency")
+def get_response_latency(window_days: int = 7, db: Session = Depends(get_db)):
+    return svc.get_response_latency_metrics(db, window_days)
+
+
+# Step 9: risk rule tuning (admin-only, enforced in service layer)
+@router.post("/risk-rules/tune")
+def post_risk_rule_update(
+    body: RiskRuleUpdateInput, admin=Depends(get_current_admin), db: Session = Depends(get_db)
+):
+    return svc.update_risk_rule(db, admin, body)
+
+
+# Step 10: log export
+@router.post("/logs/export")
+def post_log_export(
+    body: LogExportRequest, admin=Depends(get_current_admin), db: Session = Depends(get_db)
+):
+    output = svc.export_logs(db, admin, body)
+    media_type = "text/csv" if body.format == "csv" else "application/json"
+    headers = {"Content-Disposition": f'attachment; filename="{body.entity_type}_export.{body.format}"'}
+    return Response(content=output, media_type=media_type, headers=headers)
+
+==========================================
+FILE: app\schemas\admin.py
+==========================================
+# # MODULE 17: Admin Console — Schemas
+
+# from typing import Any, Literal, Optional
+
+# from pydantic import BaseModel
+
+
+# class BeachUpsertInput(BaseModel):
+#     id: Optional[str] = None
+#     name: str
+#     state: str
+#     district: Optional[str] = None
+#     coast_region: Optional[str] = None
+#     geom_geojson: dict[str, Any]  # GeoJSON Polygon
+#     has_lifeguard: bool = False
+#     public_access: bool = True
+#     active: bool = True
+
+
+# class ActivityThresholdInput(BaseModel):
+#     beach_id: str
+#     activity_type: str
+#     min_safe_wave_height: Optional[float] = None
+#     max_safe_wave_height: Optional[float] = None
+#     min_safe_wind_speed: Optional[float] = None
+#     max_safe_wind_speed: Optional[float] = None
+#     rip_current_risk_cutoff: Optional[float] = None
+
+
+# class JurisdictionUpsertInput(BaseModel):
+#     id: Optional[str] = None
+#     name: str
+#     authority_type: str
+#     contact_phone: Optional[str] = None
+#     contact_email: Optional[str] = None
+#     service_area_geom_geojson: dict[str, Any]  # GeoJSON MultiPolygon
+#     escalation_level: int = 1
+#     active: bool = True
+
+
+# class HospitalUpsertInput(BaseModel):
+#     id: Optional[str] = None
+#     name: str
+#     type: str
+#     lat: float
+#     lng: float
+#     contact_phone: Optional[str] = None
+#     contact_email: Optional[str] = None
+#     capabilities: dict[str, bool] = {}
+#     capacity_status: str = "unknown"
+#     active: bool = True
+
+
+# class IncidentReviewFilters(BaseModel):
+#     status: Optional[str] = None
+#     incident_type: Optional[str] = None
+#     beach_id: Optional[str] = None
+#     from_: Optional[str] = None
+#     to: Optional[str] = None
+#     page: int = 1
+#     page_size: int = 25
+
+
+# class AckReviewRow(BaseModel):
+#     incident_id: str
+#     target_type: str
+#     target_id: str
+#     dispatched_at: str
+#     acked_at: Optional[str] = None
+#     ack_latency_s: Optional[float] = None
+#     escalated: bool
+
+
+# class ResponseLatencyMetrics(BaseModel):
+#     window: str
+#     mean_dispatch_to_ack_s: float
+#     p50_s: float
+#     p90_s: float
+#     p99_s: float
+#     escalation_rate: float
+#     sample_size: int
+
+
+# class RiskRuleUpdateInput(BaseModel):
+#     rule_id: str
+#     parameter: str
+#     new_value: float
+#     reason: str  # mandatory justification, stored in audit
+
+
+# class LogExportRequest(BaseModel):
+#     entity_type: Literal["audit_events", "incident_reports", "notification_queue"]
+#     from_: str
+#     to: str
+#     format: Literal["csv", "json"] = "json"
+
+
+
+
+
+# MODULE 17: Admin Console — Schemas
+
+from typing import Any, Literal, Optional
+
+from pydantic import BaseModel
+
+
+class BeachUpsertInput(BaseModel):
+    id: Optional[str] = None
+    name: str
+    state: str
+    district: Optional[str] = None
+    coast_region: Optional[str] = None
+    geom_geojson: dict[str, Any]  # GeoJSON Polygon
+    has_lifeguard: bool = False
+    public_access: bool = True
+    active: bool = True
+
+
+class ActivityThresholdInput(BaseModel):
+    beach_id: str
+    activity_type: str
+    min_safe_wave_height: Optional[float] = None
+    max_safe_wave_height: Optional[float] = None
+    min_safe_wind_speed: Optional[float] = None
+    max_safe_wind_speed: Optional[float] = None
+    rip_current_risk_cutoff: Optional[float] = None
+
+
+class JurisdictionUpsertInput(BaseModel):
+    id: Optional[str] = None
+    name: str
+    authority_type: str
+    contact_phone: Optional[str] = None
+    contact_email: Optional[str] = None
+    service_area_geom_geojson: dict[str, Any]  # GeoJSON MultiPolygon
+    escalation_level: int = 1
+    active: bool = True
+
+
+class HospitalUpsertInput(BaseModel):
+    id: Optional[str] = None
+    name: str
+    type: str
+    lat: float
+    lng: float
+    contact_phone: Optional[str] = None
+    contact_email: Optional[str] = None
+    capabilities: dict[str, bool] = {}
+    capacity_status: str = "unknown"
+    active: bool = True
+
+
+class IncidentReviewFilters(BaseModel):
+    status: Optional[str] = None
+    incident_type: Optional[str] = None
+    beach_id: Optional[str] = None
+    from_: Optional[str] = None
+    to: Optional[str] = None
+    page: int = 1
+    page_size: int = 25
+
+
+class AckReviewRow(BaseModel):
+    incident_id: str
+    target_type: str
+    target_id: str
+    dispatched_at: str
+    acked_at: Optional[str] = None
+    ack_latency_s: Optional[float] = None
+    escalated: bool
+
+
+class ResponseLatencyMetrics(BaseModel):
+    window: str
+    mean_dispatch_to_ack_s: float
+    p50_s: float
+    p90_s: float
+    p99_s: float
+    escalation_rate: float
+    sample_size: int
+
+
+class RiskRuleUpdateInput(BaseModel):
+    rule_id: str
+    parameter: str
+    new_value: float
+    reason: str  # mandatory justification, stored in audit
+
+
+class LogExportRequest(BaseModel):
+    entity_type: Literal["audit_events", "incident_reports", "notification_queue"]
+    from_: str
+    to: str
+    format: Literal["csv", "json"] = "json"
+
+
+# --- B11: OTP/auth schemas, ported over from Module 20-26's admin.py (auth_router part) ---
+import uuid
+
+
+class OTPRequest(BaseModel):
+    phone: str
+
+
+class OTPRequestResponse(BaseModel):
+    phone: str
+    status: str
+    expires_in_sec: int
+
+
+class OTPVerify(BaseModel):
+    phone: str
+    code: str
+
+
+class OTPVerifyResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user_id: uuid.UUID
+
+
+class LogoutResponse(BaseModel):
+    status: str = "logged_out"
+
+==========================================
+FILE: app\services\admin_service.py
+==========================================
+"""Assumes models already exist from earlier modules:
+app.models.hospital.Hospital, app.models.jurisdiction.Jurisdiction,
+app.models.beach.Beach, app.models.safezone.SafeZone,
+app.models.beach_activity_profile.BeachActivityProfile  (Module 1 / 2B / 2C)."""
+import json
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
+from app.models.geospatial import Hospital
+from app.models.geospatial import Jurisdiction, Beach
+from app.models.geospatial import SafeZone
+from app.models.forecast_risk import BeachActivityProfile
+
+
+def _point(lat: float, lng: float):
+    return func.ST_SetSRID(func.ST_MakePoint(lng, lat), 4326)
+
+
+def _geom_from_geojson(geo):
+    return func.ST_SetSRID(func.ST_GeomFromGeoJSON(json.dumps(geo.model_dump())), 4326)
+
+
+def create_hospital(db: Session, payload) -> Hospital:
+    h = Hospital(
+        name=payload.name, type=payload.type,
+        geom=_point(payload.geom_point.lat, payload.geom_point.lng),
+        contact_phone=payload.contact_phone, contact_email=payload.contact_email,
+        capabilities=payload.capabilities, capacity_status=payload.capacity_status,
+    )
+    db.add(h); db.commit(); db.refresh(h)
+    return h
+
+
+def create_jurisdiction(db: Session, payload) -> Jurisdiction:
+    j = Jurisdiction(
+        name=payload.name, authority_type=payload.type,
+        contact_phone=payload.contact_phone, contact_email=payload.contact_email,
+        service_area_geom=_geom_from_geojson(payload.service_area_geom),
+        escalation_level=payload.escalation_level,
+    )
+    db.add(j); db.commit(); db.refresh(j)
+    return j
+
+
+def create_beach(db: Session, payload) -> Beach:
+    b = Beach(
+        name=payload.name, state=payload.state, district=payload.district,
+        coast_region=payload.coast_region, geom=_geom_from_geojson(payload.geom),
+        has_lifeguard=payload.has_lifeguard, public_access=payload.public_access,
+    )
+    db.add(b); db.commit(); db.refresh(b)
+    return b
+
+
+def create_threshold(db: Session, payload) -> BeachActivityProfile:
+    t = BeachActivityProfile(
+        beach_id=payload.beach_id, activity_type=payload.activity_type,
+        min_safe_wave_height=payload.min_safe_wave_height,
+        max_safe_current_speed=payload.max_safe_current_speed,
+        max_safe_wind_speed=payload.max_safe_wind_speed,
+        max_safe_swell=payload.max_safe_swell,
+        water_quality_min=payload.water_quality_min,
+        tide_sensitivity=payload.tide_sensitivity,
+        risk_weights=payload.risk_weights,
+    )
+    db.add(t); db.commit(); db.refresh(t)
+    return t
+
+
+def create_safezone(db: Session, payload) -> SafeZone:
+    s = SafeZone(
+        beach_id=payload.beach_id, name=payload.name,
+        geom=_geom_from_geojson(payload.geom),
+        elevation_m=payload.elevation_m, route_notes=payload.route_notes,
+    )
+    db.add(s); db.commit(); db.refresh(s)
+    return s
+
+
+==========================================
+FILE: app\services\audit_service.py
+==========================================
+# # MODULE 18: Audit and Analytics — Service
+# # This is the assumed `audit` dependency referenced by every other module (Module 8
+# # dispatch, Module 9/10 routers, Module 17 admin, Module 20-26 APIs). Single write
+# # entrypoint for audit_events — never write to that table directly elsewhere.
+
+# import json
+# from typing import Any, Optional
+
+# from sqlalchemy import text
+# from sqlalchemy.ext.asyncio import AsyncSession
+
+# from app.schemas.audit import (
+#     MeanResponseTimeResult,
+#     AlertAccuracyResult,
+#     MissedWarningResult,
+#     ThresholdRefitRecommendation,
+# )
+
+
+# # Step 1: store all events.
+# async def log_audit_event(
+#     db: AsyncSession,
+#     *,
+#     event_type: str,
+#     entity_type: str,
+#     entity_id: str,
+#     actor_type: str = "system",
+#     actor_id: Optional[str] = None,
+#     metadata: Optional[dict[str, Any]] = None,
+# ) -> None:
+#     await db.execute(
+#         text(
+#             """INSERT INTO audit_events (event_type, entity_type, entity_id, actor_type, actor_id, payload)
+#                VALUES (:event_type, :entity_type, :entity_id, :actor_type, :actor_id, :payload)"""
+#         ),
+#         {
+#             "event_type": event_type,
+#             "entity_type": entity_type,
+#             "entity_id": entity_id,
+#             "actor_type": actor_type,
+#             "actor_id": actor_id,
+#             "payload": json.dumps(metadata or {}, default=str),
+#         },
+#     )
+#     await db.commit()
+
+
+# # Step 2: store all changes (state transitions on incidents).
+# async def log_status_change(
+#     db: AsyncSession,
+#     *,
+#     incident_report_id: str,
+#     from_status: Optional[str],
+#     to_status: str,
+#     reason: Optional[str] = None,
+# ) -> None:
+#     await db.execute(
+#         text(
+#             """INSERT INTO incident_status_history (incident_report_id, from_status, to_status, reason)
+#                VALUES (:iid, :from_status, :to_status, :reason)"""
+#         ),
+#         {
+#             "iid": incident_report_id,
+#             "from_status": from_status,
+#             "to_status": to_status,
+#             "reason": reason,
+#         },
+#     )
+#     await db.commit()
+#     await log_audit_event(
+#         db,
+#         event_type="incident.status_changed",
+#         entity_type="incident_report",
+#         entity_id=incident_report_id,
+#         metadata={"from": from_status, "to": to_status, "reason": reason},
+#     )
+
+
+# # Step 3: store all acknowledgements.
+# async def log_acknowledgement(
+#     db: AsyncSession, *, incident_route_id: str, ack_status: str, ack_time: str
+# ) -> None:
+#     await db.execute(
+#         text(
+#             "UPDATE incident_routes SET ack_status = :status, ack_time = :ack_time WHERE id = :id"
+#         ),
+#         {"status": ack_status, "ack_time": ack_time, "id": incident_route_id},
+#     )
+#     result = await db.execute(
+#         text("SELECT incident_report_id, target_type FROM incident_routes WHERE id = :id"),
+#         {"id": incident_route_id},
+#     )
+#     row = result.mappings().first()
+#     await db.commit()
+#     if row:
+#         await log_audit_event(
+#             db,
+#             event_type="incident.ack_received",
+#             entity_type="incident_route",
+#             entity_id=incident_route_id,
+#             metadata={
+#                 "incident_report_id": row["incident_report_id"],
+#                 "target_type": row["target_type"],
+#                 "ack_status": ack_status,
+#             },
+#         )
+
+
+# # Step 4: compute mean response time (dispatch -> ack, across all route targets).
+# async def compute_mean_response_time(db: AsyncSession, window_days: int) -> MeanResponseTimeResult:
+#     result = await db.execute(
+#         text(
+#             """SELECT EXTRACT(EPOCH FROM (ack_time - routed_at)) as response_s
+#                FROM incident_routes
+#                WHERE routed_at >= now() - (:days || ' days')::interval
+#                  AND ack_time IS NOT NULL"""
+#         ),
+#         {"days": window_days},
+#     )
+#     values = [float(r["response_s"]) for r in result.mappings().all()]
+#     mean = sum(values) / len(values) if values else 0.0
+#     return MeanResponseTimeResult(window_days=window_days, mean_response_time_s=mean, sample_size=len(values))
+
+
+# # Step 5 + 6: alert accuracy + false positive rate.
+# # True positive: hazard_alert whose geom+validity window overlaps at least one
+# # incident_report within that window. False positive: no matching incident.
+# async def compute_alert_accuracy(db: AsyncSession, window_days: int) -> AlertAccuracyResult:
+#     result = await db.execute(
+#         text(
+#             """SELECT
+#                  ha.id,
+#                  EXISTS (
+#                    SELECT 1 FROM incident_reports ir
+#                    WHERE ir.created_at BETWEEN ha.valid_from AND COALESCE(ha.valid_to, now())
+#                      AND ST_Intersects(ir.geom, ha.geom)
+#                  ) as matched_incident
+#                FROM hazard_alerts ha
+#                WHERE ha.issued_at >= now() - (:days || ' days')::interval"""
+#         ),
+#         {"days": window_days},
+#     )
+#     rows = result.mappings().all()
+#     total = len(rows)
+#     true_positive = sum(1 for r in rows if r["matched_incident"])
+#     false_positive = total - true_positive
+
+#     return AlertAccuracyResult(
+#         window_days=window_days,
+#         total_alerts=total,
+#         true_positive_alerts=true_positive,
+#         false_positive_alerts=false_positive,
+#         accuracy=(true_positive / total) if total else 0.0,
+#         false_positive_rate=(false_positive / total) if total else 0.0,
+#     )
+
+
+# # Step 7: missed warning rate — incident occurred with no active hazard_alert covering it.
+# async def compute_missed_warning_rate(db: AsyncSession, window_days: int) -> MissedWarningResult:
+#     result = await db.execute(
+#         text(
+#             """SELECT
+#                  ir.id,
+#                  EXISTS (
+#                    SELECT 1 FROM hazard_alerts ha
+#                    WHERE ir.created_at BETWEEN ha.valid_from AND COALESCE(ha.valid_to, now())
+#                      AND ST_Intersects(ir.geom, ha.geom)
+#                  ) as had_active_alert
+#                FROM incident_reports ir
+#                WHERE ir.created_at >= now() - (:days || ' days')::interval"""
+#         ),
+#         {"days": window_days},
+#     )
+#     rows = result.mappings().all()
+#     total = len(rows)
+#     missed = sum(1 for r in rows if not r["had_active_alert"])
+
+#     return MissedWarningResult(
+#         window_days=window_days,
+#         total_incidents=total,
+#         missed_incidents=missed,
+#         missed_warning_rate=(missed / total) if total else 0.0,
+#     )
+
+
+# # Step 8: refit thresholds manually after review. Does NOT auto-apply — only computes
+# # and records a recommendation for human review (Module 17 enforces admin-only manual
+# # application via risk-rule tuning).
+# async def generate_threshold_refit_recommendations(
+#     db: AsyncSession, window_days: int
+# ) -> list[ThresholdRefitRecommendation]:
+#     result = await db.execute(
+#         text(
+#             """SELECT
+#                  ir.beach_id,
+#                  bap.activity_type,
+#                  bap.min_safe_wave_height,
+#                  count(*) as incident_count,
+#                  avg((ir.current_hazard_context->>'wave_height_m')::numeric) as avg_wave_height_at_incident
+#                FROM incident_reports ir
+#                JOIN beach_activity_profiles bap ON bap.beach_id = ir.beach_id
+#                WHERE ir.created_at >= now() - (:days || ' days')::interval
+#                  AND ir.current_hazard_context ? 'wave_height_m'
+#                GROUP BY ir.beach_id, bap.activity_type, bap.min_safe_wave_height
+#                HAVING count(*) >= 3"""
+#         ),
+#         {"days": window_days},
+#     )
+#     rows = result.mappings().all()
+
+#     recs = [
+#         ThresholdRefitRecommendation(
+#             beach_id=r["beach_id"],
+#             activity_type=r["activity_type"],
+#             rule_parameter="min_safe_wave_height",
+#             current_value=float(r["min_safe_wave_height"]) if r["min_safe_wave_height"] else None,
+#             recommended_value=float(r["avg_wave_height_at_incident"]),
+#             justification=(
+#                 f"{r['incident_count']} incidents in last {window_days}d occurred at avg wave "
+#                 f"height {float(r['avg_wave_height_at_incident']):.2f}m, below/near current "
+#                 f"threshold — suggests threshold is too permissive."
+#             ),
+#             based_on_incident_count=int(r["incident_count"]),
+#         )
+#         for r in rows
+#     ]
+
+#     for rec in recs:
+#         await log_audit_event(
+#             db,
+#             event_type="analytics.threshold_refit_recommended",
+#             entity_type="beach_activity_profile",
+#             entity_id=rec.beach_id,
+#             metadata=rec.model_dump(),
+#         )
+
+#     return recs
+
+
+
+# MODULE 18: Audit and Analytics — Service
+# Converted sync (B1) — was AsyncSession, project-wide decision is sync SQLAlchemy.
+#
+# ⚠️ B4 FIX APPLIED: this file used to define its OWN `log_audit_event`, duplicating the
+# same `audit_events` insert that app.core.audit.log_audit_event now does canonically.
+# Per B4 that duplication is removed here — `log_audit_event` is now just re-exported from
+# app.core.audit (so any old `from app.services.audit_service import log_audit_event`
+# call sites elsewhere in your codebase keep working without edits, but there is only ONE
+# real implementation now, in app/core/audit.py).
+#
+# log_status_change() and log_acknowledgement() are kept — they're real business logic
+# (writing to incident_status_history / incident_routes), not pure audit duplication —
+# but their final audit-trail write now goes through the canonical function too.
+#
+# The analytics functions below (compute_mean_response_time, compute_alert_accuracy,
+# compute_missed_warning_rate, generate_threshold_refit_recommendations) are genuinely
+# this module's own logic and are unaffected by B4 — only converted to sync.
+
+from typing import Optional
+
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+from app.core.audit import log_audit_event  # noqa: F401 — re-exported, see note above
+from app.schemas.audit import (
+    MeanResponseTimeResult,
+    AlertAccuracyResult,
+    MissedWarningResult,
+    ThresholdRefitRecommendation,
+)
+
+
+# Step 2: store all changes (state transitions on incidents).
+def log_status_change(
+    db: Session,
+    incident_report_id: str,
+    from_status: Optional[str],
+    to_status: str,
+    reason: Optional[str] = None,
+) -> None:
+    db.execute(
+        text(
+            """INSERT INTO incident_status_history (incident_report_id, from_status, to_status, reason)
+               VALUES (:iid, :from_status, :to_status, :reason)"""
+        ),
+        {
+            "iid": incident_report_id,
+            "from_status": from_status,
+            "to_status": to_status,
+            "reason": reason,
+        },
+    )
+    log_audit_event(
+        db,
+        event_type="incident.status_changed",
+        entity_type="incident_report",
+        entity_id=incident_report_id,
+        actor_type="system",
+        actor_id=None,
+        payload={"from": from_status, "to": to_status, "reason": reason},
+    )
+    db.commit()
+
+
+# Step 3: store all acknowledgements.
+def log_acknowledgement(
+    db: Session, incident_route_id: str, ack_status: str, ack_time: str
+) -> None:
+    db.execute(
+        text(
+            "UPDATE incident_routes SET ack_status = :status, ack_time = :ack_time WHERE id = :id"
+        ),
+        {"status": ack_status, "ack_time": ack_time, "id": incident_route_id},
+    )
+    result = db.execute(
+        text("SELECT incident_report_id, target_type FROM incident_routes WHERE id = :id"),
+        {"id": incident_route_id},
+    )
+    row = result.mappings().first()
+    if row:
+        log_audit_event(
+            db,
+            event_type="incident.ack_received",
+            entity_type="incident_route",
+            entity_id=incident_route_id,
+            actor_type="system",
+            actor_id=None,
+            payload={
+                "incident_report_id": row["incident_report_id"],
+                "target_type": row["target_type"],
+                "ack_status": ack_status,
+            },
+        )
+    db.commit()
+
+
+# Step 4: compute mean response time (dispatch -> ack, across all route targets).
+def compute_mean_response_time(db: Session, window_days: int) -> MeanResponseTimeResult:
+    result = db.execute(
+        text(
+            """SELECT EXTRACT(EPOCH FROM (ack_time - routed_at)) as response_s
+               FROM incident_routes
+               WHERE routed_at >= now() - (:days || ' days')::interval
+                 AND ack_time IS NOT NULL"""
+        ),
+        {"days": window_days},
+    )
+    values = [float(r["response_s"]) for r in result.mappings().all()]
+    mean = sum(values) / len(values) if values else 0.0
+    return MeanResponseTimeResult(window_days=window_days, mean_response_time_s=mean, sample_size=len(values))
+
+
+# Step 5 + 6: alert accuracy + false positive rate.
+# True positive: hazard_alert whose geom+validity window overlaps at least one
+# incident_report within that window. False positive: no matching incident.
+def compute_alert_accuracy(db: Session, window_days: int) -> AlertAccuracyResult:
+    result = db.execute(
+        text(
+            """SELECT
+                 ha.id,
+                 EXISTS (
+                   SELECT 1 FROM incident_reports ir
+                   WHERE ir.created_at BETWEEN ha.valid_from AND COALESCE(ha.valid_to, now())
+                     AND ST_Intersects(ir.geom, ha.geom)
+                 ) as matched_incident
+               FROM hazard_alerts ha
+               WHERE ha.issued_at >= now() - (:days || ' days')::interval"""
+        ),
+        {"days": window_days},
+    )
+    rows = result.mappings().all()
+    total = len(rows)
+    true_positive = sum(1 for r in rows if r["matched_incident"])
+    false_positive = total - true_positive
+
+    return AlertAccuracyResult(
+        window_days=window_days,
+        total_alerts=total,
+        true_positive_alerts=true_positive,
+        false_positive_alerts=false_positive,
+        accuracy=(true_positive / total) if total else 0.0,
+        false_positive_rate=(false_positive / total) if total else 0.0,
+    )
+
+
+# Step 7: missed warning rate — incident occurred with no active hazard_alert covering it.
+def compute_missed_warning_rate(db: Session, window_days: int) -> MissedWarningResult:
+    result = db.execute(
+        text(
+            """SELECT
+                 ir.id,
+                 EXISTS (
+                   SELECT 1 FROM hazard_alerts ha
+                   WHERE ir.created_at BETWEEN ha.valid_from AND COALESCE(ha.valid_to, now())
+                     AND ST_Intersects(ir.geom, ha.geom)
+                 ) as had_active_alert
+               FROM incident_reports ir
+               WHERE ir.created_at >= now() - (:days || ' days')::interval"""
+        ),
+        {"days": window_days},
+    )
+    rows = result.mappings().all()
+    total = len(rows)
+    missed = sum(1 for r in rows if not r["had_active_alert"])
+
+    return MissedWarningResult(
+        window_days=window_days,
+        total_incidents=total,
+        missed_incidents=missed,
+        missed_warning_rate=(missed / total) if total else 0.0,
+    )
+
+
+# Step 8: refit thresholds manually after review. Does NOT auto-apply — only computes
+# and records a recommendation for human review (Module 17 enforces admin-only manual
+# application via risk-rule tuning).
+def generate_threshold_refit_recommendations(
+    db: Session, window_days: int
+) -> list[ThresholdRefitRecommendation]:
+    result = db.execute(
+        text(
+            """SELECT
+                 ir.beach_id,
+                 bap.activity_type,
+                 bap.min_safe_wave_height,
+                 count(*) as incident_count,
+                 avg((ir.current_hazard_context->>'wave_height_m')::numeric) as avg_wave_height_at_incident
+               FROM incident_reports ir
+               JOIN beach_activity_profiles bap ON bap.beach_id = ir.beach_id
+               WHERE ir.created_at >= now() - (:days || ' days')::interval
+                 AND ir.current_hazard_context ? 'wave_height_m'
+               GROUP BY ir.beach_id, bap.activity_type, bap.min_safe_wave_height
+               HAVING count(*) >= 3"""
+        ),
+        {"days": window_days},
+    )
+    rows = result.mappings().all()
+
+    recs = [
+        ThresholdRefitRecommendation(
+            beach_id=r["beach_id"],
+            activity_type=r["activity_type"],
+            rule_parameter="min_safe_wave_height",
+            current_value=float(r["min_safe_wave_height"]) if r["min_safe_wave_height"] else None,
+            recommended_value=float(r["avg_wave_height_at_incident"]),
+            justification=(
+                f"{r['incident_count']} incidents in last {window_days}d occurred at avg wave "
+                f"height {float(r['avg_wave_height_at_incident']):.2f}m, below/near current "
+                f"threshold — suggests threshold is too permissive."
+            ),
+            based_on_incident_count=int(r["incident_count"]),
+        )
+        for r in rows
+    ]
+
+    for rec in recs:
+        log_audit_event(
+            db,
+            event_type="analytics.threshold_refit_recommended",
+            entity_type="beach_activity_profile",
+            entity_id=rec.beach_id,
+            actor_type="system",
+            actor_id=None,
+            payload=rec.model_dump(),
+        )
+    db.commit()
+
+    return recs
+
+
+==========================================
+FILE: app\api\v1\incidents.py
+==========================================
+"""Module 21 — API Layer: SOS / Incidents. Thin controllers only; logic in Module 8-11/18 services."""
+import uuid
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+from app.core.db import get_db
+from app.core.exceptions import NotFoundError, ValidationError
+from app.schemas.incident import (
+    SOSRequest, SOSResponse, TargetStatus, SafeZoneInfo,
+    IncidentDetailResponse, RiskState, RoutingInfo, IncidentSafeZone, IncidentTimestamps,
+    IncidentStatusResponse, AckEntry,
+    MediaAttachRequest, MediaAttachResponse,
+    AckRequest, AckResponse,
+)
+from app.services import incident_service
+
+sos_router = APIRouter(prefix="/v1/sos", tags=["sos"])
+incidents_router = APIRouter(prefix="/v1/incidents", tags=["incidents"])
+
+
+def _handle(fn, *args, **kwargs):
+    try:
+        return fn(*args, **kwargs)
+    except NotFoundError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(e))
+    except ValidationError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e))
+
+
+@sos_router.post("", response_model=SOSResponse, status_code=status.HTTP_201_CREATED)
+def trigger_sos(payload: SOSRequest, db: Session = Depends(get_db)):
+    incident, result, safe_zone = _handle(incident_service.create_sos, db, payload)
+    return SOSResponse(
+        incident_id=incident.id,
+        status=incident.status,
+        location_locked=True,
+        ack_timeout_sec=result.ack_timeout_sec,
+        primary_targets=[TargetStatus(**t) for t in result.primary_targets],
+        safe_zone=SafeZoneInfo(**safe_zone.__dict__) if safe_zone else None,
+        message="Help has been alerted. Stay near your location and follow safe-zone guidance.",
+    )
+
+
+@incidents_router.get("/{incident_id}", response_model=IncidentDetailResponse)
+def get_incident(incident_id: uuid.UUID, db: Session = Depends(get_db)):
+    incident, safe_zone, authority, hospital, primary = _handle(incident_service.get_incident, db, incident_id)
+    return IncidentDetailResponse(
+        incident_id=incident.id,
+        status=incident.status,
+        incident_type=incident.incident_type,
+        severity=incident.severity,
+        current_location={"lat": float(incident.lat), "lng": float(incident.lng)},
+        risk_state=RiskState(
+            beach_verdict=incident.current_hazard_context.get("current_verdict"),
+            hazards=incident.current_hazard_context.get("alert_flags", []),
+            eta_minutes=incident.current_hazard_context.get("eta_minutes"),
+        ),
+        routing=RoutingInfo(
+            primary_authority=authority.target_name if authority else None,
+            hospital=hospital.target_name if hospital else None,
+            contact_status=primary.ack_status if primary else None,
+        ),
+        safe_zone=IncidentSafeZone(name=safe_zone.name, route_eta_min=safe_zone.eta_min_walk) if safe_zone else None,
+        timestamps=IncidentTimestamps(created_at=incident.created_at, last_update=incident.updated_at),
+    )
+
+
+@incidents_router.get("/{incident_id}/status", response_model=IncidentStatusResponse)
+def get_incident_status(incident_id: uuid.UUID, db: Session = Depends(get_db)):
+    incident, acked, next_action = _handle(incident_service.get_incident_status, db, incident_id)
+    return IncidentStatusResponse(
+        incident_id=incident.id,
+        state=incident.status,
+        next_action=next_action,
+        acknowledged_by=[AckEntry(target_type=r.target_type, at=r.ack_time) for r in acked],
+    )
+
+
+@incidents_router.post("/{incident_id}/media", response_model=MediaAttachResponse)
+def attach_media(incident_id: uuid.UUID, payload: MediaAttachRequest, db: Session = Depends(get_db)):
+    media_id = _handle(incident_service.attach_media, db, incident_id, payload)
+    return MediaAttachResponse(incident_id=incident_id, media_id=media_id, status="attached")
+
+
+@incidents_router.post("/{incident_id}/ack", response_model=AckResponse)
+def ack_incident(incident_id: uuid.UUID, payload: AckRequest, db: Session = Depends(get_db)):
+    incident = _handle(incident_service.record_ack, db, incident_id, payload)
+    return AckResponse(incident_id=incident.id, status="ack_recorded")
+
+
+==========================================
+FILE: app\schemas\incident.py
+==========================================
+import uuid
+from datetime import datetime
+from typing import Optional, List
+from pydantic import BaseModel, Field
+
+
+class Location(BaseModel):
+    lat: float
+    lng: float
+    accuracy_m: Optional[float] = None
+    source: str = "gps"  # gps|network|last_known
+
+
+class HazardContext(BaseModel):
+    current_verdict: Optional[str] = None
+    alert_flags: List[str] = Field(default_factory=list)
+    eta_minutes: Optional[int] = None
+
+
+class DeviceState(BaseModel):
+    battery_pct: Optional[int] = None
+    signal_strength: Optional[str] = None
+    offline: bool = False
+
+
+class MediaItem(BaseModel):
+    type: str
+    url: str
+    caption: Optional[str] = None
+
+
+class SOSRequest(BaseModel):
+    user_id: uuid.UUID
+    device_id: Optional[uuid.UUID] = None
+    trigger_type: str  # manual|long_press|shake|voice|auto
+    incident_type: str
+    severity: str  # low|medium|high|critical
+    beach_id: Optional[uuid.UUID] = None
+    activity_type: Optional[str] = None
+    location: Location
+    hazard_context: HazardContext = HazardContext()
+    device_state: DeviceState = DeviceState()
+    contacts: List[uuid.UUID] = Field(default_factory=list)
+    media: List[MediaItem] = Field(default_factory=list)
+    notes: Optional[str] = None
+
+
+class TargetStatus(BaseModel):
+    type: str
+    name: str
+    status: str
+
+
+class SafeZoneInfo(BaseModel):
+    name: str
+    distance_m: float
+    eta_min_walk: float
+
+
+class SOSResponse(BaseModel):
+    incident_id: uuid.UUID
+    status: str
+    location_locked: bool
+    ack_timeout_sec: int
+    primary_targets: List[TargetStatus]
+    safe_zone: Optional[SafeZoneInfo] = None
+    message: str
+
+
+class RiskState(BaseModel):
+    beach_verdict: Optional[str] = None
+    hazards: List[str] = Field(default_factory=list)
+    eta_minutes: Optional[int] = None
+
+
+class RoutingInfo(BaseModel):
+    primary_authority: Optional[str] = None
+    hospital: Optional[str] = None
+    contact_status: Optional[str] = None
+
+
+class IncidentSafeZone(BaseModel):
+    name: str
+    route_eta_min: float
+
+
+class IncidentTimestamps(BaseModel):
+    created_at: datetime
+    last_update: datetime
+
+
+class IncidentDetailResponse(BaseModel):
+    incident_id: uuid.UUID
+    status: str
+    incident_type: str
+    severity: str
+    current_location: dict
+    risk_state: RiskState
+    routing: RoutingInfo
+    safe_zone: Optional[IncidentSafeZone] = None
+    timestamps: IncidentTimestamps
+
+
+class AckEntry(BaseModel):
+    target_type: str
+    at: datetime
+
+
+class IncidentStatusResponse(BaseModel):
+    incident_id: uuid.UUID
+    state: str
+    next_action: str
+    acknowledged_by: List[AckEntry]
+
+
+class MediaAttachRequest(BaseModel):
+    type: str  # photo|video|voice_note
+    url: str
+    caption: Optional[str] = None
+
+
+class MediaAttachResponse(BaseModel):
+    incident_id: uuid.UUID
+    media_id: uuid.UUID
+    status: str
+
+
+class AckRequest(BaseModel):
+    target_type: str  # 112|hospital|authority
+    target_name: str
+    ack_status: str  # received|accepted|rejected|unable
+    external_ref: Optional[str] = None
+
+
+class AckResponse(BaseModel):
+    incident_id: uuid.UUID
+    status: str
+
+
+==========================================
+FILE: app\services\incident_service.py
+==========================================
+# """
+# Module 21 service layer — SOS/Incident API orchestration only.
+# Actual routing/ranking logic lives in Module 8/9/10/11 services (assumed built):
+
+# - app.services.dispatch_service.dispatch_incident(db, incident: IncidentReport)
+#     -> DispatchResult(primary_targets: list[{type,name,status,target_id,jurisdiction_id}],
+#                        ack_timeout_sec: int)
+#   Creates IncidentRoute rows + starts escalation timer (Module 8 step 10-13, Module 9/10, Module 15).
+
+# - app.services.safezone_service.get_nearest_safe_zone(db, lat, lng)
+#     -> SafeZoneResult(name, distance_m, eta_min_walk) | None   (Module 11)
+
+# - app.core.audit.log_audit_event(...)  (Module 18)
+# """
+# import uuid
+# from datetime import datetime, timezone
+
+# from sqlalchemy.orm import Session
+
+# from app.core.exceptions import NotFoundError, ValidationError
+# from app.core.audit import log_audit_event
+# from app.models.incident import IncidentReport, IncidentRoute, IncidentStatusHistory, IncidentStatus
+# from app.services.dispatch_service import dispatch_incident
+# from app.services.safezone_service import get_nearest_safe_zone
+
+# NEXT_ACTION = {
+#     IncidentStatus.DISPATCHED: "await_acknowledgement",
+#     IncidentStatus.ACKNOWLEDGED: "follow_safe_zone_route",
+#     IncidentStatus.ROUTED: "follow_safe_zone_route",
+#     IncidentStatus.EN_ROUTE: "stay_at_location",
+#     IncidentStatus.HOSPITAL_NOTIFIED: "await_transfer",
+#     IncidentStatus.SAFE_ZONE_SHARED: "follow_safe_zone_route",
+#     IncidentStatus.RESOLVED: "incident_resolved",
+#     IncidentStatus.CLOSED: "incident_closed",
+# }
+
+
+# def _set_status(db: Session, incident: IncidentReport, to_status: str, reason: str = None):
+#     db.add(IncidentStatusHistory(incident_report_id=incident.id, from_status=incident.status,
+#                                   to_status=to_status, reason=reason))
+#     incident.status = to_status
+#     incident.updated_at = datetime.now(timezone.utc)
+
+
+# def create_sos(db: Session, payload) -> tuple[IncidentReport, object, object]:
+#     loc = payload.location
+#     incident = IncidentReport(
+#         user_id=payload.user_id,
+#         beach_id=payload.beach_id,
+#         incident_type=payload.incident_type,
+#         severity=payload.severity,
+#         lat=loc.lat,
+#         lng=loc.lng,
+#         description=payload.notes,
+#         media=[m.model_dump() for m in payload.media],
+#         trigger_type=payload.trigger_type,
+#         battery_pct=payload.device_state.battery_pct,
+#         signal_strength=payload.device_state.signal_strength,
+#         current_hazard_context=payload.hazard_context.model_dump(),
+#         status=IncidentStatus.CREATED,
+#     )
+#     db.add(incident)
+#     db.flush()  # incident.id available
+#     _set_status(db, incident, IncidentStatus.LOCATION_LOCKED, reason="gps_locked")
+
+#     result = dispatch_incident(db, incident)  # fan-out to 112/authority/hospital + escalation timer
+#     _set_status(db, incident, IncidentStatus.DISPATCHED, reason="dispatch_fanout_complete")
+
+#     safe_zone = get_nearest_safe_zone(db, loc.lat, loc.lng)
+
+#     log_audit_event(db, event_type="sos.triggered", entity_type="incident_report", entity_id=incident.id,
+#                      actor_type="user", actor_id=payload.user_id,
+#                      payload={"trigger_type": payload.trigger_type, "severity": payload.severity})
+#     db.commit()
+#     db.refresh(incident)
+#     return incident, result, safe_zone
+
+
+# def _get(db: Session, incident_id: uuid.UUID) -> IncidentReport:
+#     incident = db.query(IncidentReport).filter(IncidentReport.id == incident_id).first()
+#     if not incident:
+#         raise NotFoundError("Incident not found")
+#     return incident
+
+
+# def get_incident(db: Session, incident_id: uuid.UUID):
+#     incident = _get(db, incident_id)
+#     safe_zone = get_nearest_safe_zone(db, float(incident.lat), float(incident.lng))
+#     routes = sorted(incident.routes, key=lambda r: r.route_rank)
+#     authority = next((r for r in routes if r.target_type == "authority"), None)
+#     hospital = next((r for r in routes if r.target_type == "hospital"), None)
+#     primary = next((r for r in routes if r.target_type in ("112", "authority")), None)
+#     return incident, safe_zone, authority, hospital, primary
+
+
+# def get_incident_status(db: Session, incident_id: uuid.UUID):
+#     incident = _get(db, incident_id)
+#     acked = [r for r in incident.routes if r.ack_status in ("received", "accepted") and r.ack_time]
+#     return incident, acked, NEXT_ACTION.get(incident.status, "await_dispatch")
+
+
+# def attach_media(db: Session, incident_id: uuid.UUID, payload) -> uuid.UUID:
+#     incident = _get(db, incident_id)
+#     media_id = uuid.uuid4()
+#     item = {"id": str(media_id), "type": payload.type, "url": payload.url, "caption": payload.caption}
+#     incident.media = [*(incident.media or []), item]
+#     incident.updated_at = datetime.now(timezone.utc)
+#     db.commit()
+#     return media_id
+
+
+# def record_ack(db: Session, incident_id: uuid.UUID, payload) -> IncidentReport:
+#     incident = _get(db, incident_id)
+#     route = (
+#         db.query(IncidentRoute)
+#         .filter(IncidentRoute.incident_report_id == incident_id, IncidentRoute.target_type == payload.target_type,
+#                 IncidentRoute.target_name == payload.target_name)
+#         .first()
+#     )
+#     if not route:
+#         raise ValidationError("No matching dispatch route for this target")
+
+#     route.ack_status = payload.ack_status
+#     route.ack_time = datetime.now(timezone.utc)
+#     route.external_ref = payload.external_ref
+
+#     if payload.ack_status in ("received", "accepted") and incident.status == IncidentStatus.DISPATCHED:
+#         _set_status(db, incident, IncidentStatus.ACKNOWLEDGED, reason=f"{payload.target_name}_ack")
+
+#     log_audit_event(db, event_type="authority.ack.received", entity_type="incident_report", entity_id=incident.id,
+#                      actor_type="authority", actor_id=None,
+#                      payload={"target_type": payload.target_type, "ack_status": payload.ack_status})
+#     db.commit()
+#     db.refresh(incident)
+#     return incident
+
+
+
+
+
+"""
+Module 21 service layer — SOS/Incident API orchestration.
+
+REWRITTEN — the original assumed a single `dispatch_service.dispatch_incident()` function.
+The real architecture (confirmed from authority_router_service.py, hospital_router_service.py,
+dispatch_state_machine.py) is: authority and hospital dispatch are two SEPARATE parallel calls
+(route_to_authority, route_to_hospital — this matches hospital_router_service.py's own comment:
+"hospital pre-alerted in parallel with authority dispatch, which is exactly what Module 8 does"),
+and ALL incident_reports.status changes must go through DispatchStateMachine.transition() —
+not a local _set_status() helper — because the state machine is what schedules ack-timers,
+fires notifications, and validates the transition graph. The old _set_status() duplicated (and
+bypassed) all of that.
+
+get_nearest_safe_zone() never existed — replaced with the real safezone_service functions:
+compute_safezone_guidance() (initial computation) and get_active_guidance() (re-fetch existing).
+
+⚠️ ASSUMPTION — the `result` returned by create_sos() is now a dict describing both dispatch
+calls' outcomes (routed_count, no_match flags, route ids) rather than the originally-assumed
+DispatchResult(primary_targets, ack_timeout_sec) shape. Check the router/schema that consumes
+this return value (incidents.py / schemas/incident.py) and adjust the response model if it
+expects the old shape.
+"""
+import uuid
+from datetime import datetime, timezone
+
+from sqlalchemy.orm import Session
+
+from app.core.exceptions import NotFoundError, ValidationError
+from app.core.audit import log_audit_event
+from app.core.dispatch_states import IncidentState, InvalidTransitionError
+from app.models.incident import IncidentReport, IncidentRoute, IncidentStatusHistory, IncidentStatus
+from app.services.dispatch_state_machine import DispatchStateMachine
+from app.services.authority_router_service import route_to_authority
+from app.services.hospital_router_service import route_to_hospital
+from app.services.safezone_service import compute_safezone_guidance, get_active_guidance
+
+NEXT_ACTION = {
+    IncidentStatus.DISPATCHED: "await_acknowledgement",
+    IncidentStatus.ACKNOWLEDGED: "follow_safe_zone_route",
+    IncidentStatus.ROUTED: "follow_safe_zone_route",
+    IncidentStatus.EN_ROUTE: "stay_at_location",
+    IncidentStatus.HOSPITAL_NOTIFIED: "await_transfer",
+    IncidentStatus.SAFE_ZONE_SHARED: "follow_safe_zone_route",
+    IncidentStatus.RESOLVED: "incident_resolved",
+    IncidentStatus.CLOSED: "incident_closed",
+}
+
+
+def create_sos(db: Session, payload) -> tuple[IncidentReport, dict, dict | None]:
+    loc = payload.location
+    incident = IncidentReport(
+        user_id=payload.user_id,
+        beach_id=payload.beach_id,
+        incident_type=payload.incident_type,
+        severity=payload.severity,
+        lat=loc.lat,
+        lng=loc.lng,
+        description=payload.notes,
+        media=[m.model_dump() for m in payload.media],
+        trigger_type=payload.trigger_type,
+        battery_pct=payload.device_state.battery_pct,
+        signal_strength=payload.device_state.signal_strength,
+        current_hazard_context=payload.hazard_context.model_dump(),
+        status=IncidentStatus.CREATED,
+    )
+    db.add(incident)
+    db.flush()  # incident.id available
+
+    sm = DispatchStateMachine(db)
+    sm.transition(incident.id, IncidentState.LOCATION_LOCKED, actor_type="user",
+                  actor_id=payload.user_id, reason="gps_locked")
+
+    # Parallel fan-out — authority and hospital are dispatched independently, matching
+    # Module 8's original "never rely on one responder only" rule.
+    authority_result = route_to_authority(db, incident.id)
+    hospital_result = route_to_hospital(db, incident.id)
+
+    sm.transition(incident.id, IncidentState.DISPATCHED, actor_type="system", actor_id=None,
+                  reason="dispatch_fanout_complete",
+                  extra_payload={"authority_routed": authority_result["routed_count"],
+                                 "hospital_matched": not hospital_result["no_match"]})
+
+    safe_zone = None
+    try:
+        safe_zone = compute_safezone_guidance(
+            db, str(payload.user_id) if payload.user_id else None, loc.lat, loc.lng,
+            beach_id=str(payload.beach_id) if payload.beach_id else None,
+            incident_report_id=str(incident.id), trigger_reason="sos_created",
+        )
+    except ValueError:
+        pass  # NO_SAFE_ZONE_FOUND_IN_RADIUS — incident still valid without one
+
+    log_audit_event(db, event_type="sos.triggered", entity_type="incident_report", entity_id=incident.id,
+                     actor_type="user", actor_id=payload.user_id,
+                     payload={"trigger_type": payload.trigger_type, "severity": payload.severity})
+    db.commit()
+    db.refresh(incident)
+    return incident, {"authority": authority_result, "hospital": hospital_result}, safe_zone
+
+
+def _get(db: Session, incident_id: uuid.UUID) -> IncidentReport:
+    incident = db.query(IncidentReport).filter(IncidentReport.id == incident_id).first()
+    if not incident:
+        raise NotFoundError("Incident not found")
+    return incident
+
+
+def get_incident(db: Session, incident_id: uuid.UUID):
+    incident = _get(db, incident_id)
+    safe_zone = get_active_guidance(db, str(incident.user_id) if incident.user_id else None,
+                                     incident_report_id=str(incident.id))
+    routes = sorted(incident.routes, key=lambda r: r.route_rank)
+    authority = next((r for r in routes if r.target_type == "authority"), None)
+    hospital = next((r for r in routes if r.target_type == "hospital"), None)
+    primary = next((r for r in routes if r.target_type in ("112", "authority")), None)
+    return incident, safe_zone, authority, hospital, primary
+
+
+def get_incident_status(db: Session, incident_id: uuid.UUID):
+    incident = _get(db, incident_id)
+    acked = [r for r in incident.routes if r.ack_status in ("received", "accepted", "acknowledged") and r.ack_time]
+    return incident, acked, NEXT_ACTION.get(incident.status, "await_dispatch")
+
+
+def attach_media(db: Session, incident_id: uuid.UUID, payload) -> uuid.UUID:
+    incident = _get(db, incident_id)
+    media_id = uuid.uuid4()
+    item = {"id": str(media_id), "type": payload.type, "url": payload.url, "caption": payload.caption}
+    incident.media = [*(incident.media or []), item]
+    incident.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    return media_id
+
+
+def record_ack(db: Session, incident_id: uuid.UUID, payload) -> IncidentReport:
+    """Generic ack recorder for route targets that don't have a dedicated ack endpoint
+    (e.g. '112', 'contact'). Authority and hospital routes should go through
+    authority_router_service.acknowledge_authority_route() / hospital_router_service.
+    acknowledge_hospital_route() instead, since those correctly drive the state machine
+    with the right target-specific IncidentState transition."""
+    incident = _get(db, incident_id)
+    route = (
+        db.query(IncidentRoute)
+        .filter(IncidentRoute.incident_report_id == incident_id, IncidentRoute.target_type == payload.target_type,
+                IncidentRoute.target_name == payload.target_name)
+        .first()
+    )
+    if not route:
+        raise ValidationError("No matching dispatch route for this target")
+
+    route.ack_status = payload.ack_status
+    route.ack_time = datetime.now(timezone.utc)
+    route.external_ref = payload.external_ref
+
+    if payload.ack_status in ("received", "accepted") and incident.status == IncidentStatus.DISPATCHED:
+        sm = DispatchStateMachine(db)
+        try:
+            sm.transition(incident.id, IncidentState.ACKNOWLEDGED, actor_type=payload.target_type,
+                          reason=f"{payload.target_name}_ack")
+        except InvalidTransitionError:
+            pass  # route-level ack still recorded above even if state already moved on
+
+    log_audit_event(db, event_type="authority.ack.received", entity_type="incident_report", entity_id=incident.id,
+                     actor_type="authority", actor_id=None,
+                     payload={"target_type": payload.target_type, "ack_status": payload.ack_status})
+    db.commit()
+    db.refresh(incident)
+    return incident
+
+==========================================
+FILE: app\services\authority_router_service.py
+==========================================
+"""
+Module 9 — Authority Router.
+Dispatch logic (route_to_authority) only writes incident_routes — never touches
+incident_reports.status, so it's unaffected by the state-machine migration.
+Only acknowledge_authority_route changes: it now drives DISPATCHED -> ACKNOWLEDGED
+through DispatchStateMachine instead of a raw UPDATE.
+"""
+import json
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+from app.core.config import settings
+from app.core.audit import log_audit_event
+from app.core.dispatch_states import IncidentState, InvalidTransitionError
+from app.services.dispatch_state_machine import DispatchStateMachine
+from app.services.channels.sms_channel import send_sms
+
+SEARCH_RADIUS_M = 20_000
+RESPONDER_AVG_SPEED_MPS = 11  # heuristic, distinct from hospital-router's ambulance constant
+WEIGHTS = {"alpha": 0.3, "beta": 0.2, "gamma": 0.2, "delta": 0.2, "eta": 0.1}
+
+
+def _required_classes(incident_type: str, severity: str) -> list[str]:
+    mapping = {
+        "drowning": ["lifeguard", "marine_police", "coast_guard"],
+        "missing_person": ["marine_police", "local_police"],
+        "harassment": ["local_police"],
+        "injury": ["local_police", "marine_police"],
+        "cyclone_storm_surge": ["district_disaster_authority", "marine_police", "coast_guard"],
+    }
+    if incident_type in mapping:
+        return mapping[incident_type]
+    return ["local_police", "marine_police", "district_disaster_authority"] if severity == "severe" else ["local_police"]
+
+
+def _find_jurisdiction_candidates(db: Session, lat: float, lng: float, classes: list[str]) -> list[dict]:
+    non_lifeguard = [c for c in classes if c != "lifeguard"]
+    if not non_lifeguard:
+        return []
+    rows = db.execute(text("""
+        SELECT id, name, authority_type, contact_phone, contact_email, escalation_level,
+               ST_Distance(service_area_geom::geography, ST_SetSRID(ST_MakePoint(:lng,:lat),4326)::geography) AS distance_m,
+               ST_Contains(service_area_geom, ST_SetSRID(ST_MakePoint(:lng,:lat),4326)) AS inside
+        FROM jurisdictions
+        WHERE active = true AND authority_type = ANY(:classes)
+          AND ST_DWithin(service_area_geom::geography, ST_SetSRID(ST_MakePoint(:lng,:lat),4326)::geography, :radius)
+        ORDER BY inside DESC, distance_m ASC LIMIT 10
+    """), {"lng": lng, "lat": lat, "classes": non_lifeguard, "radius": SEARCH_RADIUS_M}).mappings().all()
+    return [{"source_table": "jurisdictions", "target_id": r["id"], "name": r["name"], "authority_type": r["authority_type"],
+             "contact_phone": r["contact_phone"], "distance_m": float(r["distance_m"]), "inside": r["inside"]} for r in rows]
+
+
+def _find_lifeguard_candidates(db: Session, lat: float, lng: float, classes: list[str]) -> list[dict]:
+    if "lifeguard" not in classes:
+        return []
+    rows = db.execute(text("""
+        SELECT id, name, contact_phone,
+               ST_Distance(geom::geography, ST_SetSRID(ST_MakePoint(:lng,:lat),4326)::geography) AS distance_m
+        FROM rescue_posts
+        WHERE active = true AND post_type = 'lifeguard'
+          AND ST_DWithin(geom::geography, ST_SetSRID(ST_MakePoint(:lng,:lat),4326)::geography, :radius)
+        ORDER BY distance_m ASC LIMIT 5
+    """), {"lng": lng, "lat": lat, "radius": SEARCH_RADIUS_M}).mappings().all()
+    return [{"source_table": "rescue_posts", "target_id": r["id"], "name": r["name"], "authority_type": "lifeguard",
+             "contact_phone": r["contact_phone"], "distance_m": float(r["distance_m"]), "inside": True} for r in rows]
+
+
+def _score_authority(c: dict, required_classes: list[str]) -> dict:
+    eta_minutes = round((c["distance_m"] / RESPONDER_AVG_SPEED_MPS) / 60, 1)
+    proximity_score = 1 - min(c["distance_m"] / SEARCH_RADIUS_M, 1)
+    response_time_score = 1 / max(eta_minutes, 1)
+    jurisdiction_match_score = 1 if c["inside"] else 0.4
+    capability_score = 0.8 if c["authority_type"] in required_classes else 0.4
+    availability_score = 0.7  # heuristic — no live availability data source in schema
+
+    score = (WEIGHTS["alpha"] * proximity_score + WEIGHTS["beta"] * capability_score +
+             WEIGHTS["gamma"] * availability_score + WEIGHTS["delta"] * response_time_score +
+             WEIGHTS["eta"] * jurisdiction_match_score)
+    return {**c, "eta_minutes": eta_minutes, "score": round(score, 5)}
+
+
+def _build_packet(incident_report_id, lat: float, lng: float, incident_type: str, severity: str,
+                   eta_minutes: float, contact: str | None, notes: str) -> dict:
+    return {
+        "incident_report_id": str(incident_report_id), "location": {"lat": lat, "lng": lng},
+        "incident_type": incident_type, "severity": severity, "eta_minutes": eta_minutes,
+        "live_gps_link": f"{settings.APP_BASE_URL}/track/{incident_report_id}",
+        "reporting_contact": contact, "dispatcher_notes": notes,
+    }
+
+
+def _packet_to_sms(p: dict, name: str) -> str:
+    return (f"INCIDENT ALERT ({name}): {p['incident_type']} ({p['severity']}). ETA {p['eta_minutes']} min. "
+            f"Live: {p['live_gps_link']}. Reporter contact: {p['reporting_contact'] or 'N/A'}.")
+
+
+def _dispatch(db: Session, incident_report_id, route_rank: int, jurisdiction_id, a: dict, packet: dict) -> str:
+    row = db.execute(text("""
+        INSERT INTO incident_routes (incident_report_id, target_type, target_name, target_id, jurisdiction_id, route_rank, ack_status, packet_payload)
+        VALUES (:irid,'authority',:name,:tid,:jid,:rank,'sent',:packet) RETURNING id
+    """), {"irid": incident_report_id, "name": a["name"], "tid": a["target_id"], "jid": jurisdiction_id,
+           "rank": route_rank, "packet": json.dumps(packet)}).mappings().first()
+    route_id = str(row["id"])
+
+    sms_result = send_sms(a.get("contact_phone") or "", _packet_to_sms(packet, a["name"]))
+    if not sms_result["ok"]:
+        db.execute(text("UPDATE incident_routes SET last_error = :e WHERE id = :id"), {"e": sms_result.get("error"), "id": route_id})
+
+    log_audit_event(db, event_type="authority.dispatched", entity_type="incident_route", entity_id=route_id,
+                     actor_type="system", actor_id=None,
+                     payload={"target_id": str(a["target_id"]), "authority_type": a["authority_type"], "score": a["score"], "rank": route_rank})
+    return route_id
+
+
+def route_to_authority(db: Session, incident_report_id) -> dict:
+    ir = db.execute(text("""SELECT lat, lng, incident_type, severity, description, user_id
+                             FROM incident_reports WHERE id = :id"""), {"id": incident_report_id}).mappings().first()
+    if not ir:
+        raise ValueError("INCIDENT_NOT_FOUND")
+
+    required_classes = _required_classes(ir["incident_type"], ir["severity"])
+    jur = _find_jurisdiction_candidates(db, float(ir["lat"]), float(ir["lng"]), required_classes)
+    lg = _find_lifeguard_candidates(db, float(ir["lat"]), float(ir["lng"]), required_classes)
+    candidates = jur + lg
+
+    if not candidates:
+        log_audit_event(db, event_type="authority.no_match", entity_type="incident_report",
+                         entity_id=incident_report_id, actor_type="system", actor_id=None,
+                         payload={"required_classes": required_classes})
+        return {"routed_count": 0, "route_ids": [], "no_match": True}
+
+    ranked = sorted((_score_authority(c, required_classes) for c in candidates), key=lambda x: -x["score"])
+
+    reporting_contact = None
+    if ir["user_id"]:
+        u = db.execute(text("SELECT phone FROM users WHERE id = :id"), {"id": ir["user_id"]}).mappings().first()
+        reporting_contact = u["phone"] if u else None
+
+    top_k, rest = ranked[:2], ranked[2:]
+    route_ids = []
+    for i, a in enumerate(top_k):
+        packet = _build_packet(incident_report_id, float(ir["lat"]), float(ir["lng"]), ir["incident_type"],
+                                ir["severity"], a["eta_minutes"], reporting_contact, ir["description"] or "")
+        jurisdiction_id = a["target_id"] if a["source_table"] == "jurisdictions" else None
+        route_ids.append(_dispatch(db, incident_report_id, i + 1, jurisdiction_id, a, packet))
+
+    for i, a in enumerate(rest):
+        packet = _build_packet(incident_report_id, float(ir["lat"]), float(ir["lng"]), ir["incident_type"],
+                                ir["severity"], a["eta_minutes"], reporting_contact, ir["description"] or "")
+        jurisdiction_id = a["target_id"] if a["source_table"] == "jurisdictions" else None
+        db.execute(text("""
+            INSERT INTO incident_routes (incident_report_id, target_type, target_name, target_id, jurisdiction_id, route_rank, ack_status, packet_payload)
+            VALUES (:irid,'authority',:name,:tid,:jid,:rank,'not_sent',:packet)
+        """), {"irid": incident_report_id, "name": a["name"], "tid": a["target_id"], "jid": jurisdiction_id,
+               "rank": len(top_k) + i + 1, "packet": json.dumps(packet)})
+
+    db.commit()
+    return {"routed_count": len(route_ids), "route_ids": route_ids, "no_match": False}
+
+
+def acknowledge_authority_route(db: Session, route_id: str) -> None:
+    """CHANGED: was a raw UPDATE incident_reports.status='routed'. Now goes through
+    DispatchStateMachine: DISPATCHED -> ACKNOWLEDGED (valid per TRANSITIONS graph).
+    This also auto-cancels the pending ack_timer via DispatchStateMachine._on_enter."""
+    row = db.execute(text("""UPDATE incident_routes SET ack_status = 'acknowledged', ack_time = now()
+                              WHERE id = :id AND target_type = 'authority' RETURNING incident_report_id"""),
+                      {"id": route_id}).mappings().first()
+    if not row:
+        raise ValueError("ROUTE_NOT_FOUND")
+
+    sm = DispatchStateMachine(db)
+    try:
+        sm.transition(row["incident_report_id"], IncidentState.ACKNOWLEDGED,
+                       actor_type="authority", reason="authority_ack_received")
+        db.commit()
+    except InvalidTransitionError:
+        # Incident already moved past DISPATCHED (e.g. hospital ack raced ahead, or ops force-closed).
+        # Route-level ack is still recorded above — don't lose that — just skip the state transition.
+        db.commit()
+
+
+==========================================
+FILE: app\services\hospital_router_service.py
+==========================================
+"""
+Module 10 — Hospital Router. Same treatment as Module 9: dispatch logic unchanged,
+only acknowledge_hospital_route now drives the state machine.
+"""
+import json
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+from app.core.config import settings
+from app.core.audit import log_audit_event
+from app.core.dispatch_states import IncidentState, InvalidTransitionError
+from app.services.dispatch_state_machine import DispatchStateMachine
+from app.services.channels.sms_channel import send_sms
+
+SEARCH_RADIUS_M = 15_000
+AMBULANCE_AVG_SPEED_MPS = 8.3  # heuristic, shared with tracking_service
+WEIGHTS = {"mu1": 0.35, "mu2": 0.25, "mu3": 0.2, "mu4": 0.15, "mu5": 0.05}
+CAPACITY_SCORE = {"available": 1, "limited": 0.5, "full": 0.1, "unknown": 0.3}
+
+
+def _required_capabilities(incident_type: str, severity: str) -> dict:
+    base = {"trauma": False, "icu": False, "pediatric": False, "oxygen": False, "coastal_access": True}
+    if incident_type == "drowning":
+        return {**base, "trauma": True, "oxygen": True, "icu": severity == "severe"}
+    if incident_type == "injury":
+        return {**base, "trauma": True, "icu": severity == "severe"}
+    if incident_type == "cyclone_storm_surge":
+        return {**base, "trauma": True, "icu": True, "oxygen": True}
+    return base
+
+
+def _find_candidates(db: Session, lat: float, lng: float, req: dict) -> list[dict]:
+    rows = db.execute(text("""
+        SELECT id, name, contact_phone, contact_email, capabilities, capacity_status,
+               ST_Distance(geom::geography, ST_SetSRID(ST_MakePoint(:lng,:lat),4326)::geography) AS distance_m
+        FROM hospitals
+        WHERE active = true
+          AND ST_DWithin(geom::geography, ST_SetSRID(ST_MakePoint(:lng,:lat),4326)::geography, :radius)
+          AND (NOT :trauma OR (capabilities->>'trauma')::boolean IS TRUE)
+          AND (NOT :icu OR (capabilities->>'icu')::boolean IS TRUE)
+          AND (NOT :oxygen OR (capabilities->>'oxygen')::boolean IS TRUE)
+        ORDER BY distance_m ASC LIMIT 10
+    """), {"lng": lng, "lat": lat, "radius": SEARCH_RADIUS_M,
+           "trauma": req["trauma"], "icu": req["icu"], "oxygen": req["oxygen"]}).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def _specialty_match_score(capabilities: dict, req: dict) -> float:
+    keys = list(req.keys())
+    matched = sum(1 for k in keys if not req[k] or capabilities.get(k) is True)
+    return matched / len(keys)
+
+
+def _capability_coverage_score(capabilities: dict) -> float:
+    flags = sum(1 for v in capabilities.values() if v is True)
+    return min(flags / 4, 1)
+
+
+def _score_hospital(c: dict, req: dict) -> dict:
+    eta_minutes = round((float(c["distance_m"]) / AMBULANCE_AVG_SPEED_MPS) / 60, 1)
+    eta_inv = 1 / max(eta_minutes, 1)
+    capacity_score = CAPACITY_SCORE.get(c["capacity_status"], 0.3)
+    specialty_score = _specialty_match_score(c["capabilities"], req)
+    capability_score = _capability_coverage_score(c["capabilities"])
+    confidence = 0.7  # heuristic — no capacity-freshness timestamp in schema
+
+    score = (WEIGHTS["mu1"] * eta_inv + WEIGHTS["mu2"] * capability_score + WEIGHTS["mu3"] * capacity_score +
+             WEIGHTS["mu4"] * specialty_score + WEIGHTS["mu5"] * confidence)
+    return {**c, "eta_minutes": eta_minutes, "score": round(score, 5)}
+
+
+def _build_packet(incident_report_id, lat: float, lng: float, incident_type: str, severity: str,
+                   eta_minutes: float, patient_flags: list[str], accompanying_contact: str | None, notes: str) -> dict:
+    return {
+        "incident_report_id": str(incident_report_id), "location": {"lat": lat, "lng": lng},
+        "incident_type": incident_type, "severity": severity, "eta_minutes": eta_minutes,
+        "patient_condition_flags": patient_flags, "age_gender": None,
+        "live_gps_link": f"{settings.APP_BASE_URL}/track/{incident_report_id}",
+        "accompanying_contact": accompanying_contact, "dispatcher_notes": notes,
+    }
+
+
+def _packet_to_sms(p: dict) -> str:
+    return (f"PRE-ARRIVAL ALERT: {p['incident_type']} ({p['severity']}). ETA {p['eta_minutes']} min. "
+            f"Flags: {', '.join(p['patient_condition_flags']) or 'none'}. Live: {p['live_gps_link']}. "
+            f"Contact: {p['accompanying_contact'] or 'N/A'}.")
+
+
+def _dispatch(db: Session, incident_report_id, route_rank: int, hospital: dict, packet: dict) -> str:
+    row = db.execute(text("""
+        INSERT INTO incident_routes (incident_report_id, target_type, target_name, target_id, route_rank, ack_status, packet_payload)
+        VALUES (:irid,'hospital',:name,:hid,:rank,'sent',:packet) RETURNING id
+    """), {"irid": incident_report_id, "name": hospital["name"], "hid": hospital["id"],
+           "rank": route_rank, "packet": json.dumps(packet)}).mappings().first()
+    route_id = str(row["id"])
+
+    sms_result = send_sms(hospital.get("contact_phone") or "", _packet_to_sms(packet))
+    if not sms_result["ok"]:
+        db.execute(text("UPDATE incident_routes SET last_error = :e WHERE id = :id"),
+                   {"e": sms_result.get("error"), "id": route_id})
+
+    log_audit_event(db, event_type="hospital.dispatched", entity_type="incident_route", entity_id=route_id,
+                     actor_type="system", actor_id=None,
+                     payload={"hospital_id": str(hospital["id"]), "score": hospital["score"], "rank": route_rank})
+    return route_id
+
+
+def route_to_hospital(db: Session, incident_report_id) -> dict:
+    ir = db.execute(text("""SELECT lat, lng, incident_type, severity, description, user_id
+                             FROM incident_reports WHERE id = :id"""), {"id": incident_report_id}).mappings().first()
+    if not ir:
+        raise ValueError("INCIDENT_NOT_FOUND")
+
+    req = _required_capabilities(ir["incident_type"], ir["severity"])
+    candidates = _find_candidates(db, float(ir["lat"]), float(ir["lng"]), req)
+
+    if not candidates:
+        log_audit_event(db, event_type="hospital.no_match", entity_type="incident_report",
+                         entity_id=incident_report_id, actor_type="system", actor_id=None,
+                         payload={"required_capabilities": req})
+        return {"primary_route_id": None, "backup_route_id": None, "no_match": True}
+
+    ranked = sorted((_score_hospital(c, req) for c in candidates), key=lambda x: -x["score"])
+    primary, backup = ranked[0], (ranked[1] if len(ranked) > 1 else None)
+    patient_flags = [ir["incident_type"]] + (["high_severity"] if ir["severity"] == "severe" else [])
+
+    accompanying_contact = None
+    if ir["user_id"]:
+        u = db.execute(text("SELECT phone FROM users WHERE id = :id"), {"id": ir["user_id"]}).mappings().first()
+        accompanying_contact = u["phone"] if u else None
+
+    primary_packet = _build_packet(incident_report_id, float(ir["lat"]), float(ir["lng"]), ir["incident_type"],
+                                    ir["severity"], primary["eta_minutes"], patient_flags, accompanying_contact, ir["description"] or "")
+    primary_route_id = _dispatch(db, incident_report_id, 1, primary, primary_packet)
+
+    backup_route_id = None
+    if backup:
+        backup_packet = _build_packet(incident_report_id, float(ir["lat"]), float(ir["lng"]), ir["incident_type"],
+                                       ir["severity"], backup["eta_minutes"], patient_flags, accompanying_contact, ir["description"] or "")
+        row = db.execute(text("""
+            INSERT INTO incident_routes (incident_report_id, target_type, target_name, target_id, route_rank, ack_status, packet_payload)
+            VALUES (:irid,'hospital',:name,:hid,2,'not_sent',:packet) RETURNING id
+        """), {"irid": incident_report_id, "name": backup["name"], "hid": backup["id"], "packet": json.dumps(backup_packet)}).mappings().first()
+        backup_route_id = str(row["id"])
+
+    db.commit()
+    return {"primary_route_id": primary_route_id, "backup_route_id": backup_route_id, "no_match": False}
+
+
+def acknowledge_hospital_route(db: Session, route_id: str) -> None:
+    """CHANGED: was a raw UPDATE incident_reports.status='hospital_notified'. Now goes through
+    DispatchStateMachine. NOTE: per TRANSITIONS graph, HOSPITAL_NOTIFIED is only reachable
+    FROM en_route, not directly from dispatched/acknowledged/routed. If hospital ack can
+    legitimately arrive before EN_ROUTE (e.g. hospital pre-alerted in parallel with authority
+    dispatch, which is exactly what Module 8 does), this WILL raise InvalidTransitionError
+    until the incident has passed through ROUTED -> EN_ROUTE first. This is a real sequencing
+    gap between Module 8's parallel dispatch and Module 27's linear graph — unresolved,
+    flagged, not guessed at. Handling it defensively below: hospital ack is always recorded
+    on the route regardless, and the state transition is attempted but not fatal if it's
+    out of sequence."""
+    row = db.execute(text("""UPDATE incident_routes SET ack_status = 'acknowledged', ack_time = now()
+                              WHERE id = :id AND target_type = 'hospital' RETURNING incident_report_id"""),
+                      {"id": route_id}).mappings().first()
+    if not row:
+        raise ValueError("ROUTE_NOT_FOUND")
+
+    sm = DispatchStateMachine(db)
+    try:
+        sm.transition(row["incident_report_id"], IncidentState.HOSPITAL_NOTIFIED,
+                       actor_type="hospital", reason="hospital_ack_received")
+        db.commit()
+    except InvalidTransitionError:
+        db.commit()  # route-level ack preserved; state transition skipped — see note above
+
+
+==========================================
+FILE: app\api\v1\offline_sync.py
+==========================================
+# # MODULE 16: Offline-First Engineering — API Router
+# # Mounted at /v1/sync — matches project-wide "/v1/..." convention (no "/api" prefix,
+# # per Module 20-26: POST /v1/trips, POST /v1/sos).
+
+# from fastapi import APIRouter, Depends, Header, HTTPException
+# from sqlalchemy.ext.asyncio import AsyncSession
+
+# from app.core.db import get_db
+# from app.core.security import get_current_user
+# from app.schemas.offline_sync import (
+#     SyncBundleQuery,
+#     SyncBundleResponse,
+#     OfflineSosSyncRequest,
+#     OfflineSosSyncResponse,
+# )
+# from app.services.offline_sync_service import build_sync_bundle, sync_offline_sos_queue
+
+# router = APIRouter(prefix="/v1/sync", tags=["sync"])
+
+
+# @router.get("/bundle", response_model=SyncBundleResponse)
+# async def get_sync_bundle(
+#     beach_ids: str = "",
+#     last_synced_at: str | None = None,
+#     x_device_id: str = Header(...),
+#     user=Depends(get_current_user),
+#     db: AsyncSession = Depends(get_db),
+# ):
+#     q = SyncBundleQuery(
+#         beach_ids=[b for b in beach_ids.split(",") if b],
+#         last_synced_at=last_synced_at,
+#         device_id=x_device_id,
+#     )
+#     return await build_sync_bundle(db, q)
+
+
+# # Called immediately on reconnect, before anything else, so queued SOS never sits idle.
+# @router.post("/sos-queue", response_model=OfflineSosSyncResponse)
+# async def post_offline_sos_sync(
+#     body: OfflineSosSyncRequest,
+#     user=Depends(get_current_user),
+#     db: AsyncSession = Depends(get_db),
+# ):
+#     if len(body.packets) == 0:
+#         return OfflineSosSyncResponse(results=[])
+#     if len(body.packets) > 50:
+#         raise HTTPException(status_code=400, detail="batch too large, max 50 packets per sync")
+
+#     return await sync_offline_sos_queue(db, body)
+
+
+# MODULE 16: Offline-First Engineering — API Router
+# Mounted at /v1/sync — matches project-wide "/v1/..." convention (no "/api" prefix,
+# per Module 20-26: POST /v1/trips, POST /v1/sos).
+# Converted sync (B1) — was AsyncSession, project-wide decision is sync SQLAlchemy.
+
+from fastapi import APIRouter, Depends, Header, HTTPException
+from sqlalchemy.orm import Session
+
+from app.core.db import get_db
+from app.core.security import get_current_user
+from app.schemas.offline_sync import (
+    SyncBundleQuery,
+    SyncBundleResponse,
+    OfflineSosSyncRequest,
+    OfflineSosSyncResponse,
+)
+from app.services.offline_sync_service import build_sync_bundle, sync_offline_sos_queue
+
+router = APIRouter(prefix="/v1/sync", tags=["sync"])
+
+
+@router.get("/bundle", response_model=SyncBundleResponse)
+def get_sync_bundle(
+    beach_ids: str = "",
+    last_synced_at: str | None = None,
+    x_device_id: str = Header(...),
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    q = SyncBundleQuery(
+        beach_ids=[b for b in beach_ids.split(",") if b],
+        last_synced_at=last_synced_at,
+        device_id=x_device_id,
+    )
+    return build_sync_bundle(db, q)
+
+
+# Called immediately on reconnect, before anything else, so queued SOS never sits idle.
+@router.post("/sos-queue", response_model=OfflineSosSyncResponse)
+def post_offline_sos_sync(
+    body: OfflineSosSyncRequest,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if len(body.packets) == 0:
+        return OfflineSosSyncResponse(results=[])
+    if len(body.packets) > 50:
+        raise HTTPException(status_code=400, detail="batch too large, max 50 packets per sync")
+
+    return sync_offline_sos_queue(db, body)
+
+==========================================
+FILE: app\services\offline_sync_service.py
+==========================================
+# # MODULE 16: Offline-First Engineering — Service
+# # Depends on: Module 2 schema, Module 5/6 (risk+forecast), Module 8 (SOS packet contract,
+# # via dispatch_service.create_incident_from_packet), Module 18 (audit_service).
+
+# from datetime import datetime, timezone
+
+# from sqlalchemy import text
+# from sqlalchemy.ext.asyncio import AsyncSession
+
+# from app.schemas.offline_sync import (
+#     SyncBundleQuery,
+#     SyncBundleResponse,
+#     StampedRecord,
+#     OfflineSosSyncRequest,
+#     OfflineSosSyncResponse,
+#     OfflineSosSyncResult,
+#     QueuedSosPacket,
+# )
+# from app.services.dispatch_service import create_incident_from_packet  # Module 8
+# from app.services.audit_service import log_audit_event  # Module 18
+
+# TTL = {
+#     "beach_risk_snapshot": 60 * 30,  # 30 min — risk changes fast, must be marked stale quickly
+#     "trip_plan": 60 * 60 * 6,
+#     "safe_zone": 60 * 60 * 24 * 7,  # rarely changes
+#     "emergency_contact": 60 * 60 * 24 * 7,
+#     "authority_directory": 60 * 60 * 24,
+#     "hospital_directory": 60 * 60 * 24,
+#     "alert_summary": 60 * 15,
+# }
+
+
+# def _stamp(data: dict, ttl_key: str) -> StampedRecord:
+#     return StampedRecord(
+#         data=data,
+#         server_version=1,
+#         cached_at=datetime.now(timezone.utc),
+#         stale_after_s=TTL[ttl_key],
+#     )
+
+
+# async def build_sync_bundle(db: AsyncSession, q: SyncBundleQuery) -> SyncBundleResponse:
+#     beach_ids = q.beach_ids
+
+#     # Step 1: beach risk snapshots (only beaches user actually cares about — keeps payload
+#     # small on weak networks)
+#     risk_rows = []
+#     if beach_ids:
+#         result = await db.execute(
+#             text(
+#                 """SELECT beach_id, risk_level, risk_score, computed_at, explanation
+#                    FROM beach_risk_scores
+#                    WHERE beach_id = ANY(:beach_ids)
+#                    ORDER BY computed_at DESC"""
+#             ),
+#             {"beach_ids": beach_ids},
+#         )
+#         risk_rows = [dict(r._mapping) for r in result]
+
+#     # Step 2: last active/upcoming trip plan
+#     trip_result = await db.execute(
+#         text(
+#             """SELECT * FROM trip_plans
+#                WHERE user_id = :user_id AND status IN ('active','upcoming')
+#                ORDER BY updated_at DESC LIMIT 1"""
+#         ),
+#         {"user_id": q.device_id},  # caller must scope by authenticated user_id upstream
+#     )
+#     trip_row = trip_result.mappings().first()
+
+#     # Step 3: safe zones
+#     safe_zone_rows = []
+#     if beach_ids:
+#         result = await db.execute(
+#             text(
+#                 """SELECT id, beach_id, name, ST_AsGeoJSON(geom) as geom, elevation_m, route_notes
+#                    FROM safe_zones WHERE beach_id = ANY(:beach_ids) AND active = true"""
+#             ),
+#             {"beach_ids": beach_ids},
+#         )
+#         safe_zone_rows = [dict(r._mapping) for r in result]
+
+#     # Step 4: emergency contacts
+#     contact_result = await db.execute(
+#         text(
+#             """SELECT id, name, phone, relation, priority FROM emergency_contacts
+#                WHERE user_id = :user_id ORDER BY priority ASC"""
+#         ),
+#         {"user_id": q.device_id},
+#     )
+#     contact_rows = [dict(r._mapping) for r in contact_result]
+
+#     # Step 5: authority directory
+#     authority_rows = []
+#     if beach_ids:
+#         result = await db.execute(
+#             text(
+#                 """SELECT j.id, j.name, j.authority_type, j.contact_phone, j.contact_email, j.escalation_level
+#                    FROM jurisdictions j
+#                    JOIN beaches b ON ST_Intersects(j.service_area_geom, b.geom)
+#                    WHERE b.id = ANY(:beach_ids) AND j.active = true"""
+#             ),
+#             {"beach_ids": beach_ids},
+#         )
+#         authority_rows = [dict(r._mapping) for r in result]
+
+#     # Step 6: hospital directory (nearest 20, capped for payload size)
+#     hospital_rows = []
+#     if beach_ids:
+#         result = await db.execute(
+#             text(
+#                 """SELECT h.id, h.name, h.type, h.contact_phone, h.capabilities, h.capacity_status,
+#                           ST_AsGeoJSON(h.geom) as geom
+#                    FROM hospitals h, beaches b
+#                    WHERE b.id = ANY(:beach_ids) AND h.active = true
+#                    ORDER BY b.centroid <-> h.geom
+#                    LIMIT 20"""
+#             ),
+#             {"beach_ids": beach_ids},
+#         )
+#         hospital_rows = [dict(r._mapping) for r in result]
+
+#     # Step 7: last alert summary
+#     alert_row = None
+#     if beach_ids:
+#         result = await db.execute(
+#             text(
+#                 """SELECT id, beach_id, severity, hazard_type, message, issued_at
+#                    FROM hazard_alerts
+#                    WHERE beach_id = ANY(:beach_ids)
+#                    ORDER BY issued_at DESC LIMIT 1"""
+#             ),
+#             {"beach_ids": beach_ids},
+#         )
+#         alert_row = result.mappings().first()
+
+#     return SyncBundleResponse(
+#         synced_at=datetime.now(timezone.utc),
+#         beach_risk_snapshots=[_stamp(r, "beach_risk_snapshot") for r in risk_rows],
+#         trip_plan=_stamp(dict(trip_row), "trip_plan") if trip_row else None,
+#         safe_zones=[_stamp(r, "safe_zone") for r in safe_zone_rows],
+#         emergency_contacts=[_stamp(r, "emergency_contact") for r in contact_rows],
+#         authority_directory=[_stamp(r, "authority_directory") for r in authority_rows],
+#         hospital_directory=[_stamp(r, "hospital_directory") for r in hospital_rows],
+#         alert_summary=_stamp(dict(alert_row), "alert_summary") if alert_row else None,
+#     )
+
+
+# def _to_canonical_packet(p: QueuedSosPacket) -> dict:
+#     # Maps offline queue shape -> Module 8 canonical SOS packet shape.
+#     return {
+#         "client_incident_id": p.client_incident_id,
+#         "user_id": p.user_id,
+#         "lat": p.lat,
+#         "lng": p.lng,
+#         "accuracy_m": p.accuracy_m,
+#         "source_of_location": p.source_of_location,
+#         "beach_id": p.beach_id,
+#         "activity_type": p.activity_type,
+#         "incident_type": p.incident_type,
+#         "severity": p.severity,
+#         "media_urls": p.media_refs,
+#         "battery_pct": p.battery_pct,
+#         "signal_strength": p.signal_strength,
+#         "offline_flag": True,
+#         "timestamp": p.created_at_client,
+#     }
+
+
+# # Step 8-9: ingest offline-queued SOS packets on reconnect. Idempotent on client_incident_id —
+# # client may retry the same batch if the ack never arrived.
+# async def sync_offline_sos_queue(
+#     db: AsyncSession, req: OfflineSosSyncRequest
+# ) -> OfflineSosSyncResponse:
+#     results: list[OfflineSosSyncResult] = []
+
+#     for packet in req.packets:
+#         try:
+#             existing = await db.execute(
+#                 text("SELECT id FROM incident_reports WHERE client_incident_id = :cid"),
+#                 {"cid": packet.client_incident_id},
+#             )
+#             existing_row = existing.mappings().first()
+
+#             if existing_row:
+#                 results.append(
+#                     OfflineSosSyncResult(
+#                         client_incident_id=packet.client_incident_id,
+#                         status="duplicate",
+#                         server_incident_id=existing_row["id"],
+#                     )
+#                 )
+#                 continue
+
+#             incident = await create_incident_from_packet(
+#                 db, _to_canonical_packet(packet), received_late=True
+#             )
+
+#             await log_audit_event(
+#                 db,
+#                 entity_type="incident_report",
+#                 entity_id=incident.id,
+#                 event_type="incident.offline_sync.ingested",
+#                 metadata={
+#                     "client_incident_id": packet.client_incident_id,
+#                     "created_at_client": packet.created_at_client.isoformat(),
+#                     "delay_s": int(
+#                         (datetime.now(timezone.utc) - packet.created_at_client).total_seconds()
+#                     ),
+#                 },
+#             )
+
+#             results.append(
+#                 OfflineSosSyncResult(
+#                     client_incident_id=packet.client_incident_id,
+#                     status="accepted",
+#                     server_incident_id=incident.id,
+#                 )
+#             )
+#         except Exception as err:  # noqa: BLE001 — must never abort the whole batch
+#             results.append(
+#                 OfflineSosSyncResult(
+#                     client_incident_id=packet.client_incident_id,
+#                     status="rejected",
+#                     reason=str(err),
+#                 )
+#             )
+
+#     return OfflineSosSyncResponse(results=results)
+
+
+# MODULE 16: Offline-First Engineering — Service
+# Depends on: Module 2 schema, Module 5/6 (risk+forecast), Module 8 (SOS packet contract,
+# via dispatch_service.create_incident_from_packet), Module 18 (audit_service).
+#
+# Converted sync (B1) — was AsyncSession, project-wide decision is sync SQLAlchemy.
+#
+# ⚠️ B4 FIX APPLIED: was importing `app.services.audit_service.log_audit_event` (the
+# module18 async variant, now superseded per B4). Redirected to the canonical
+# `app.core.audit.log_audit_event`, and the call below now uses that function's real
+# signature (positional event_type/entity_type/entity_id/actor_type/actor_id/payload —
+# NOT the old metadata= keyword).
+#
+# ⚠️ FLAGGED GAP (same pattern as B10's missing ingestion_service.py): this file imports
+# `app.services.dispatch_service.create_incident_from_packet`, but no `dispatch_service.py`
+# exists in ANY delivered module/zip. The closest real equivalent is `sos_service.py`
+# (from m8-14.zip) which almost certainly has the SOS-creation logic this needs — but its
+# exact function name/signature wasn't visible to me. Two options:
+#   1. If sos_service.py has a function like `create_incident(db, ...)` or `trigger_sos(db, ...)`,
+#      rename the import below to point at it and adapt the packet-dict argument to match
+#      its actual parameter names.
+#   2. Write a thin `app/services/dispatch_service.py` that wraps sos_service's real function.
+# Left as-is below (import will fail until you resolve this) rather than guessing a fake
+# function that would silently produce wrong behavior.
+
+from datetime import datetime, timezone
+
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+from app.schemas.offline_sync import (
+    SyncBundleQuery,
+    SyncBundleResponse,
+    StampedRecord,
+    OfflineSosSyncRequest,
+    OfflineSosSyncResponse,
+    OfflineSosSyncResult,
+    QueuedSosPacket,
+)
+from app.services.dispatch_service import create_incident_from_packet  # Module 8 — ⚠️ see note above
+from app.core.audit import log_audit_event  # B4 — canonical, was app.services.audit_service
+
+TTL = {
+    "beach_risk_snapshot": 60 * 30,  # 30 min — risk changes fast, must be marked stale quickly
+    "trip_plan": 60 * 60 * 6,
+    "safe_zone": 60 * 60 * 24 * 7,  # rarely changes
+    "emergency_contact": 60 * 60 * 24 * 7,
+    "authority_directory": 60 * 60 * 24,
+    "hospital_directory": 60 * 60 * 24,
+    "alert_summary": 60 * 15,
+}
+
+
+def _stamp(data: dict, ttl_key: str) -> StampedRecord:
+    return StampedRecord(
+        data=data,
+        server_version=1,
+        cached_at=datetime.now(timezone.utc),
+        stale_after_s=TTL[ttl_key],
+    )
+
+
+def build_sync_bundle(db: Session, q: SyncBundleQuery) -> SyncBundleResponse:
+    beach_ids = q.beach_ids
+
+    # Step 1: beach risk snapshots (only beaches user actually cares about — keeps payload
+    # small on weak networks)
+    risk_rows = []
+    if beach_ids:
+        result = db.execute(
+            text(
+                """SELECT beach_id, risk_level, risk_score, computed_at, explanation
+                   FROM beach_risk_scores
+                   WHERE beach_id = ANY(:beach_ids)
+                   ORDER BY computed_at DESC"""
+            ),
+            {"beach_ids": beach_ids},
+        )
+        risk_rows = [dict(r._mapping) for r in result]
+
+    # Step 2: last active/upcoming trip plan
+    # NOTE: uses q.device_id as user_id here — carried over unchanged from the original
+    # file. If device_id and user_id are genuinely different concepts in your schema
+    # (device vs authenticated user), this row/step 4 below need the real user_id passed
+    # in from the router instead of the device header. Flagging, not silently changing.
+    trip_result = db.execute(
+        text(
+            """SELECT * FROM trip_plans
+               WHERE user_id = :user_id AND status IN ('active','upcoming')
+               ORDER BY updated_at DESC LIMIT 1"""
+        ),
+        {"user_id": q.device_id},
+    )
+    trip_row = trip_result.mappings().first()
+
+    # Step 3: safe zones
+    safe_zone_rows = []
+    if beach_ids:
+        result = db.execute(
+            text(
+                """SELECT id, beach_id, name, ST_AsGeoJSON(geom) as geom, elevation_m, route_notes
+                   FROM safe_zones WHERE beach_id = ANY(:beach_ids) AND active = true"""
+            ),
+            {"beach_ids": beach_ids},
+        )
+        safe_zone_rows = [dict(r._mapping) for r in result]
+
+    # Step 4: emergency contacts
+    contact_result = db.execute(
+        text(
+            """SELECT id, name, phone, relation, priority FROM emergency_contacts
+               WHERE user_id = :user_id ORDER BY priority ASC"""
+        ),
+        {"user_id": q.device_id},
+    )
+    contact_rows = [dict(r._mapping) for r in contact_result]
+
+    # Step 5: authority directory
+    authority_rows = []
+    if beach_ids:
+        result = db.execute(
+            text(
+                """SELECT j.id, j.name, j.authority_type, j.contact_phone, j.contact_email, j.escalation_level
+                   FROM jurisdictions j
+                   JOIN beaches b ON ST_Intersects(j.service_area_geom, b.geom)
+                   WHERE b.id = ANY(:beach_ids) AND j.active = true"""
+            ),
+            {"beach_ids": beach_ids},
+        )
+        authority_rows = [dict(r._mapping) for r in result]
+
+    # Step 6: hospital directory (nearest 20, capped for payload size)
+    hospital_rows = []
+    if beach_ids:
+        result = db.execute(
+            text(
+                """SELECT h.id, h.name, h.type, h.contact_phone, h.capabilities, h.capacity_status,
+                          ST_AsGeoJSON(h.geom) as geom
+                   FROM hospitals h, beaches b
+                   WHERE b.id = ANY(:beach_ids) AND h.active = true
+                   ORDER BY b.centroid <-> h.geom
+                   LIMIT 20"""
+            ),
+            {"beach_ids": beach_ids},
+        )
+        hospital_rows = [dict(r._mapping) for r in result]
+
+    # Step 7: last alert summary
+    alert_row = None
+    if beach_ids:
+        result = db.execute(
+            text(
+                """SELECT id, beach_id, severity, hazard_type, message, issued_at
+                   FROM hazard_alerts
+                   WHERE beach_id = ANY(:beach_ids)
+                   ORDER BY issued_at DESC LIMIT 1"""
+            ),
+            {"beach_ids": beach_ids},
+        )
+        alert_row = result.mappings().first()
+
+    return SyncBundleResponse(
+        synced_at=datetime.now(timezone.utc),
+        beach_risk_snapshots=[_stamp(r, "beach_risk_snapshot") for r in risk_rows],
+        trip_plan=_stamp(dict(trip_row), "trip_plan") if trip_row else None,
+        safe_zones=[_stamp(r, "safe_zone") for r in safe_zone_rows],
+        emergency_contacts=[_stamp(r, "emergency_contact") for r in contact_rows],
+        authority_directory=[_stamp(r, "authority_directory") for r in authority_rows],
+        hospital_directory=[_stamp(r, "hospital_directory") for r in hospital_rows],
+        alert_summary=_stamp(dict(alert_row), "alert_summary") if alert_row else None,
+    )
+
+
+def _to_canonical_packet(p: QueuedSosPacket) -> dict:
+    # Maps offline queue shape -> Module 8 canonical SOS packet shape.
+    return {
+        "client_incident_id": p.client_incident_id,
+        "user_id": p.user_id,
+        "lat": p.lat,
+        "lng": p.lng,
+        "accuracy_m": p.accuracy_m,
+        "source_of_location": p.source_of_location,
+        "beach_id": p.beach_id,
+        "activity_type": p.activity_type,
+        "incident_type": p.incident_type,
+        "severity": p.severity,
+        "media_urls": p.media_refs,
+        "battery_pct": p.battery_pct,
+        "signal_strength": p.signal_strength,
+        "offline_flag": True,
+        "timestamp": p.created_at_client,
+    }
+
+
+# Step 8-9: ingest offline-queued SOS packets on reconnect. Idempotent on client_incident_id —
+# client may retry the same batch if the ack never arrived.
+def sync_offline_sos_queue(
+    db: Session, req: OfflineSosSyncRequest
+) -> OfflineSosSyncResponse:
+    results: list[OfflineSosSyncResult] = []
+
+    for packet in req.packets:
+        try:
+            existing = db.execute(
+                text("SELECT id FROM incident_reports WHERE client_incident_id = :cid"),
+                {"cid": packet.client_incident_id},
+            )
+            existing_row = existing.mappings().first()
+
+            if existing_row:
+                results.append(
+                    OfflineSosSyncResult(
+                        client_incident_id=packet.client_incident_id,
+                        status="duplicate",
+                        server_incident_id=existing_row["id"],
+                    )
+                )
+                continue
+
+            incident = create_incident_from_packet(
+                db, _to_canonical_packet(packet), received_late=True
+            )
+
+            log_audit_event(
+                db,
+                event_type="incident.offline_sync.ingested",
+                entity_type="incident_report",
+                entity_id=incident.id,
+                actor_type="user",
+                actor_id=packet.user_id,
+                payload={
+                    "client_incident_id": packet.client_incident_id,
+                    "created_at_client": packet.created_at_client.isoformat(),
+                    "delay_s": int(
+                        (datetime.now(timezone.utc) - packet.created_at_client).total_seconds()
+                    ),
+                },
+            )
+            db.commit()
+
+            results.append(
+                OfflineSosSyncResult(
+                    client_incident_id=packet.client_incident_id,
+                    status="accepted",
+                    server_incident_id=incident.id,
+                )
+            )
+        except Exception as err:  # noqa: BLE001 — must never abort the whole batch
+            db.rollback()
+            results.append(
+                OfflineSosSyncResult(
+                    client_incident_id=packet.client_incident_id,
+                    status="rejected",
+                    reason=str(err),
+                )
+            )
+
+    return OfflineSosSyncResponse(results=results)
+
+==========================================
+FILE: app\workers\cleanup_worker.py
+==========================================
+"""
+app/workers/cleanup_worker.py
+Beat calls prune_expired() hourly — clears expired cache entries / stale rows.
+dedup.py already self-expires via Redis TTL, so this targets DB-side and
+cache-side cleanup only.
+
+ASSUMPTION: app.core.cache exposes prune_expired() — not verified
+against real cache.py yet.
+"""
+from __future__ import annotations
+import logging
+from celery import shared_task
+from app.core.cache import prune_expired as cache_prune_expired  # Bug #13 fix — was shadowed by local prune_expired() below, causing infinite self-recursion
+
+logger = logging.getLogger(__name__)
+
+
+@shared_task(name="workers.cleanup.prune_expired")
+def prune_expired() -> dict:
+    try:
+        cache_cleared = cache_prune_expired()
+        return {"cache_keys_cleared": cache_cleared}
+    except Exception:
+        logger.exception("cleanup_worker.prune_failed")
+        raise
+
+==========================================
+FILE: app\core\cache.py
+==========================================
+"""
+app/core/cache.py
+
+Redis-backed cache helpers for the risk engine (Module 5) and forecast engine (Module 6),
+which per their own comments cache computed risk/forecast values in Redis rather than
+recomputing on every request.
+
+⚠️ ASSUMPTION — risk_engine/ and forecast_engine/ (Module 5 & 6 zips) were not available to
+verify their exact key-naming convention. The functions below (`get_json`, `set_json`,
+`prune_expired`) follow the naming convention implied by cleanup_worker.py's comment
+("Redis risk/forecast cache (Module 5 step 10)") and its confirmed call:
+
+    from app.core.cache import prune_expired
+    ...
+    pruned = prune_expired()   # called with zero args, returns an int count
+
+If risk_engine/engine.py or forecast_engine/*.py use a different key prefix than
+"risk:*" / "forecast:*", update RISK_PREFIX / FORECAST_PREFIX below to match — everything
+else in this file is prefix-agnostic.
+"""
+import json
+from typing import Any, Optional
+
+from app.redis_client import redis_client
+
+RISK_PREFIX = "risk:"
+FORECAST_PREFIX = "forecast:"
+
+
+def get_json(key: str) -> Optional[Any]:
+    raw = redis_client.get(key)
+    return json.loads(raw) if raw is not None else None
+
+
+def set_json(key: str, value: Any, ttl_seconds: int) -> None:
+    redis_client.set(key, json.dumps(value, default=str), ex=ttl_seconds)
+
+
+def prune_expired() -> int:
+    """Redis TTL keys expire on their own — this exists as a defensive sweep for any
+    risk:*/forecast:* keys that were written without a TTL (a bug elsewhere) so they
+    don't accumulate forever. Returns the number of keys deleted.
+    Called by cleanup_worker.py's scheduled task with no arguments."""
+    pruned = 0
+    for prefix in (RISK_PREFIX, FORECAST_PREFIX):
+        for key in redis_client.scan_iter(match=f"{prefix}*"):
+            if redis_client.ttl(key) == -1:  # -1 = exists but no TTL set
+                redis_client.delete(key)
+                pruned += 1
+    return pruned
+
+==========================================
+FILE: app\services\beach_service.py
+==========================================
+# # MODULE 19: API Layer — Beaches, Risk, Forecast — Service
+# # Thin read layer: does NOT reimplement scoring — calls Module 5 (risk_engine) and
+# # Module 6 (forecast_engine) services directly, per those modules' own deliverables.
+
+# import json
+
+# from sqlalchemy import text
+# from sqlalchemy.ext.asyncio import AsyncSession
+
+# from app.services.risk_engine import compute_beach_activity_risk  # Module 5
+# from app.services.forecast_engine import get_forecast_timeline  # Module 6
+# from app.schemas.beach import (
+#     BeachSearchItem,
+#     BeachDetail,
+#     SafeZoneRef,
+#     JurisdictionRef,
+#     RiskResponse,
+#     RiskExplanation,
+#     ForecastItem,
+#     AlertItem,
+# )
+
+
+# # GET /v1/beaches — spatial search + latest risk snapshot join.
+# async def search_beaches(
+#     db: AsyncSession,
+#     state: str | None,
+#     near: tuple[float, float] | None,  # (lat, lng)
+#     radius_m: int | None,
+#     activity: str | None,
+# ) -> list[BeachSearchItem]:
+#     conditions = ["b.active = true"]
+#     params: dict = {}
+
+#     if state:
+#         conditions.append("b.state = :state")
+#         params["state"] = state
+
+#     distance_select = "NULL as distance_m"
+#     order_by = "b.name ASC"
+#     if near:
+#         lat, lng = near
+#         params["lat"] = lat
+#         params["lng"] = lng
+#         distance_select = (
+#             "ST_Distance(b.geom::geography, "
+#             "ST_SetSRID(ST_MakePoint(:lng,:lat),4326)::geography) as distance_m"
+#         )
+#         order_by = "distance_m ASC"
+#         if radius_m:
+#             params["radius_m"] = radius_m
+#             conditions.append(
+#                 "ST_DWithin(b.geom::geography, "
+#                 "ST_SetSRID(ST_MakePoint(:lng,:lat),4326)::geography, :radius_m)"
+#             )
+
+#     if activity:
+#         params["activity"] = activity
+#         activity_join = """LEFT JOIN LATERAL (
+#             SELECT risk_score, verdict FROM beach_risk_scores brs
+#             WHERE brs.beach_id = b.id AND brs.activity_type = :activity
+#             ORDER BY brs.forecast_time DESC LIMIT 1
+#         ) rs ON true"""
+#     else:
+#         activity_join = """LEFT JOIN LATERAL (
+#             SELECT risk_score, verdict FROM beach_risk_scores brs
+#             WHERE brs.beach_id = b.id
+#             ORDER BY brs.forecast_time DESC LIMIT 1
+#         ) rs ON true"""
+
+#     result = await db.execute(
+#         text(
+#             f"""SELECT b.id, b.name, b.state, b.district, b.has_lifeguard, {distance_select},
+#                        rs.verdict as current_verdict, rs.risk_score as current_risk_score
+#                 FROM beaches b
+#                 {activity_join}
+#                 WHERE {' AND '.join(conditions)}
+#                 ORDER BY {order_by}
+#                 LIMIT 50"""
+#         ),
+#         params,
+#     )
+#     rows = result.mappings().all()
+
+#     return [
+#         BeachSearchItem(
+#             id=r["id"],
+#             name=r["name"],
+#             state=r["state"],
+#             district=r["district"],
+#             distance_m=round(r["distance_m"]) if r["distance_m"] is not None else None,
+#             has_lifeguard=r["has_lifeguard"],
+#             current_verdict=r["current_verdict"],
+#             current_risk_score=float(r["current_risk_score"]) if r["current_risk_score"] is not None else None,
+#         )
+#         for r in rows
+#     ]
+
+
+# # GET /v1/beaches/{id} — detail page.
+# async def get_beach_detail(db: AsyncSession, beach_id: str) -> BeachDetail | None:
+#     result = await db.execute(
+#         text(
+#             """SELECT id, name, state, district, has_lifeguard, public_access, ST_AsGeoJSON(geom) as geom
+#                FROM beaches WHERE id = :id AND active = true"""
+#         ),
+#         {"id": beach_id},
+#     )
+#     beach_row = result.mappings().first()
+#     if not beach_row:
+#         return None
+
+#     zones_result = await db.execute(
+#         text(
+#             """SELECT id, name,
+#                       ST_Distance(geom::geography, (SELECT centroid FROM beaches WHERE id=:id)::geography) as distance_m
+#                FROM safe_zones WHERE beach_id = :id AND active = true
+#                ORDER BY distance_m ASC"""
+#         ),
+#         {"id": beach_id},
+#     )
+#     safe_zones = zones_result.mappings().all()
+
+#     juris_result = await db.execute(
+#         text(
+#             """SELECT j.id, j.name FROM jurisdictions j, beaches b
+#                WHERE b.id = :id AND ST_Intersects(j.service_area_geom, b.geom) AND j.active = true
+#                ORDER BY j.escalation_level ASC LIMIT 1"""
+#         ),
+#         {"id": beach_id},
+#     )
+#     jurisdiction = juris_result.mappings().first()
+
+#     return BeachDetail(
+#         id=beach_row["id"],
+#         name=beach_row["name"],
+#         state=beach_row["state"],
+#         district=beach_row["district"],
+#         geom=json.loads(beach_row["geom"]),
+#         has_lifeguard=beach_row["has_lifeguard"],
+#         public_access=beach_row["public_access"],
+#         safe_zones=[
+#             SafeZoneRef(id=z["id"], name=z["name"], distance_m=round(z["distance_m"]))
+#             for z in safe_zones
+#         ],
+#         jurisdiction=JurisdictionRef(id=jurisdiction["id"], name=jurisdiction["name"])
+#         if jurisdiction
+#         else None,
+#     )
+
+
+# # GET /v1/beaches/{id}/risk — delegates entirely to Module 5 risk engine, which itself:
+# # loads profiles, applies hard overrides, computes+stores snapshot.
+# async def get_beach_risk(db: AsyncSession, beach_id: str, activity_type: str) -> RiskResponse:
+#     result = await compute_beach_activity_risk(db, beach_id, activity_type)
+#     return RiskResponse(
+#         beach_id=beach_id,
+#         activity_type=activity_type,
+#         forecast_time=result.forecast_time,
+#         risk_score=result.risk_score,
+#         verdict=result.verdict,
+#         hard_override_reason=result.hard_override_reason,
+#         explanation=RiskExplanation(top_factors=result.explanation.top_factors),
+#     )
+
+
+# # GET /v1/beaches/{id}/forecast — delegates to Module 6 forecast engine.
+# async def get_beach_forecast(
+#     db: AsyncSession, beach_id: str, activity_type: str, hours: int
+# ) -> list[ForecastItem]:
+#     timeline = await get_forecast_timeline(db, beach_id, activity_type, hours)
+#     return [
+#         ForecastItem(
+#             forecast_time=slot.forecast_time,
+#             wave_height=slot.wave_height,
+#             current_speed=slot.current_speed,
+#             wind_speed=slot.wind_speed,
+#             risk_score=slot.risk_score,
+#             verdict=slot.verdict,
+#         )
+#         for slot in timeline
+#     ]
+
+
+# # GET /v1/alerts — active official alerts near a point.
+# async def get_active_alerts(
+#     db: AsyncSession, lat: float, lng: float, radius_m: int
+# ) -> list[AlertItem]:
+#     result = await db.execute(
+#         text(
+#             """SELECT id, alert_type, severity, title, valid_from, valid_to
+#                FROM hazard_alerts
+#                WHERE status = 'active'
+#                  AND (valid_to IS NULL OR valid_to > now())
+#                  AND ST_DWithin(geom::geography, ST_SetSRID(ST_MakePoint(:lng,:lat),4326)::geography, :radius_m)
+#                ORDER BY severity DESC, issued_at DESC
+#                LIMIT 100"""
+#         ),
+#         {"lat": lat, "lng": lng, "radius_m": radius_m},
+#     )
+#     return [AlertItem(**dict(r)) for r in result.mappings().all()]
+
+
+
+
+
+
+
+
+
+# MODULE 19: API Layer — Beaches, Risk, Forecast — Service
+# Thin read layer: does NOT reimplement scoring — calls Module 5 (risk_engine) and
+# Module 6 (forecast_engine) services directly, per those modules' own deliverables.
+#
+# Converted sync (B1) — was AsyncSession, project-wide decision is sync SQLAlchemy.
+#
+# ⚠️ FLAGGED IMPORT PATH ISSUE (not part of B1, but will break at import time): this file
+# imports `from app.services.risk_engine import compute_beach_activity_risk` and
+# `from app.services.forecast_engine import get_forecast_timeline` — but per your project's
+# own folder scaffold (Part A1), Module 5 and 6 were copied to `backend/risk_engine/` and
+# `backend/forecast_engine/` as TOP-LEVEL packages (siblings of `app/`), not nested under
+# `app/services/`. The two imports below are updated to `from risk_engine... import ...` /
+# `from forecast_engine... import ...` to match that actual folder layout — but I don't have
+# Module 5/6's zips to verify the exact submodule/filename inside those packages (e.g.
+# risk_engine/engine.py vs risk_engine/__init__.py). If `compute_beach_activity_risk` and
+# `get_forecast_timeline` live in a specific file inside those packages rather than being
+# re-exported at the package root, adjust the import path accordingly.
+
+import json
+
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+from fastapi import HTTPException
+
+from risk_engine.engine import compute_and_store_risk # Module 5 — verify actual submodule path
+from forecast_engine.engine import compute_forecast_outlook  # Module 6 — verify actual submodule path
+from app.schemas.beach import (
+    BeachSearchItem,
+    BeachDetail,
+    SafeZoneRef,
+    JurisdictionRef,
+    RiskResponse,
+    RiskExplanation,
+    ForecastItem,
+    AlertItem,
+)
+
+
+# GET /v1/beaches — spatial search + latest risk snapshot join.
+def search_beaches(
+    db: Session,
+    state: str | None,
+    near: tuple[float, float] | None,  # (lat, lng)
+    radius_m: int | None,
+    activity: str | None,
+) -> list[BeachSearchItem]:
+    conditions = ["b.active = true"]
+    params: dict = {}
+
+    if state:
+        conditions.append("b.state = :state")
+        params["state"] = state
+
+    distance_select = "NULL as distance_m"
+    order_by = "b.name ASC"
+    if near:
+        lat, lng = near
+        params["lat"] = lat
+        params["lng"] = lng
+        distance_select = (
+            "ST_Distance(b.geom::geography, "
+            "ST_SetSRID(ST_MakePoint(:lng,:lat),4326)::geography) as distance_m"
+        )
+        order_by = "distance_m ASC"
+        if radius_m:
+            params["radius_m"] = radius_m
+            conditions.append(
+                "ST_DWithin(b.geom::geography, "
+                "ST_SetSRID(ST_MakePoint(:lng,:lat),4326)::geography, :radius_m)"
+            )
+
+    if activity:
+        params["activity"] = activity
+        activity_join = """LEFT JOIN LATERAL (
+            SELECT risk_score, verdict FROM beach_risk_scores brs
+            WHERE brs.beach_id = b.id AND brs.activity_type = :activity
+            ORDER BY brs.forecast_time DESC LIMIT 1
+        ) rs ON true"""
+    else:
+        activity_join = """LEFT JOIN LATERAL (
+            SELECT risk_score, verdict FROM beach_risk_scores brs
+            WHERE brs.beach_id = b.id
+            ORDER BY brs.forecast_time DESC LIMIT 1
+        ) rs ON true"""
+
+    result = db.execute(
+        text(
+            f"""SELECT b.id, b.name, b.state, b.district, b.has_lifeguard, {distance_select},
+                       rs.verdict as current_verdict, rs.risk_score as current_risk_score
+                FROM beaches b
+                {activity_join}
+                WHERE {' AND '.join(conditions)}
+                ORDER BY {order_by}
+                LIMIT 50"""
+        ),
+        params,
+    )
+    rows = result.mappings().all()
+
+    return [
+        BeachSearchItem(
+            id=str(r["id"]),
+            name=r["name"],
+            state=r["state"],
+            district=r["district"],
+            distance_m=round(r["distance_m"]) if r["distance_m"] is not None else None,
+            has_lifeguard=r["has_lifeguard"],
+            current_verdict=r["current_verdict"],
+            current_risk_score=float(r["current_risk_score"]) if r["current_risk_score"] is not None else None,
+        )
+        for r in rows
+    ]
+
+
+# GET /v1/beaches/{id} — detail page.
+def get_beach_detail(db: Session, beach_id: str) -> BeachDetail | None:
+    result = db.execute(
+        text(
+            """SELECT id, name, state, district, has_lifeguard, public_access, ST_AsGeoJSON(geom) as geom
+               FROM beaches WHERE id = :id AND active = true"""
+        ),
+        {"id": beach_id},
+    )
+    beach_row = result.mappings().first()
+    if not beach_row:
+        return None
+
+    zones_result = db.execute(
+        text(
+            """SELECT id, name,
+                      ST_Distance(geom::geography, (SELECT centroid FROM beaches WHERE id=:id)::geography) as distance_m
+               FROM safe_zones WHERE beach_id = :id AND active = true
+               ORDER BY distance_m ASC"""
+        ),
+        {"id": beach_id},
+    )
+    safe_zones = zones_result.mappings().all()
+
+    juris_result = db.execute(
+        text(
+            """SELECT j.id, j.name FROM jurisdictions j, beaches b
+               WHERE b.id = :id AND ST_Intersects(j.service_area_geom, b.geom) AND j.active = true
+               ORDER BY j.escalation_level ASC LIMIT 1"""
+        ),
+        {"id": beach_id},
+    )
+    jurisdiction = juris_result.mappings().first()
+
+    return BeachDetail(
+        id=beach_row["id"],
+        name=beach_row["name"],
+        state=beach_row["state"],
+        district=beach_row["district"],
+        geom=json.loads(beach_row["geom"]),
+        has_lifeguard=beach_row["has_lifeguard"],
+        public_access=beach_row["public_access"],
+        safe_zones=[
+            SafeZoneRef(id=z["id"], name=z["name"], distance_m=round(z["distance_m"]))
+            for z in safe_zones
+        ],
+        jurisdiction=JurisdictionRef(id=jurisdiction["id"], name=jurisdiction["name"])
+        if jurisdiction
+        else None,
+    )
+
+
+# GET /v1/beaches/{id}/risk — delegates entirely to Module 5 risk engine, which itself:
+# loads profiles, applies hard overrides, computes+stores snapshot.
+def get_beach_risk(db: Session, beach_id: str, activity_type: str) -> RiskResponse:
+    result = compute_and_store_risk(beach_id, activity_type)
+    if not result:
+        raise HTTPException(status_code=404, detail="risk could not be computed for this beach/activity")
+    return RiskResponse(
+        beach_id=beach_id,
+        activity_type=activity_type,
+        forecast_time=result.get("forecast_time"),
+        risk_score=result.get("risk_score"),
+        verdict=result.get("verdict"),
+        hard_override_reason=result.get("hard_override_reason"),
+        explanation=RiskExplanation(top_factors=result.get("explanation", {}).get("top_factors", [])),
+    )
+
+
+# GET /v1/beaches/{id}/forecast — delegates to Module 6 forecast engine.
+def get_beach_forecast(
+    db: Session, beach_id: str, activity_type: str, hours: int
+) -> list[ForecastItem]:
+    result = compute_forecast_outlook(beach_id, activity_type)
+    # ⚠️ ASSUMPTION — result shape not verified against actual return statement in
+    # forecast_engine/engine.py's compute_forecast_outlook(). It likely returns something
+    # built from outlook.py's ForecastOutlook (build_outlook) rather than a flat list of
+    # points. If this errors, check engine.py's return statement and outlook.py's
+    # ForecastOutlook/RiskPoint shape and adjust the mapping below.
+    points = result.get("points", [])
+    return [
+        ForecastItem(
+            forecast_time=p.get("forecast_time"),
+            wave_height=p.get("wave_height"),
+            current_speed=p.get("current_speed"),
+            wind_speed=p.get("wind_speed"),
+            risk_score=p.get("risk_score"),
+            verdict=p.get("verdict"),
+        )
+        for p in points
+    ]
+
+
+# GET /v1/alerts — active official alerts near a point.
+def get_active_alerts(
+    db: Session, lat: float, lng: float, radius_m: int
+) -> list[AlertItem]:
+    result = db.execute(
+        text(
+            """SELECT id, alert_type, severity, title, valid_from, valid_to
+               FROM hazard_alerts
+               WHERE status = 'active'
+                 AND (valid_to IS NULL OR valid_to > now())
+                 AND ST_DWithin(geom::geography, ST_SetSRID(ST_MakePoint(:lng,:lat),4326)::geography, :radius_m)
+               ORDER BY severity DESC, issued_at DESC
+               LIMIT 100"""
+        ),
+        {"lat": lat, "lng": lng, "radius_m": radius_m},
+    )
+    return [AlertItem(**dict(r)) for r in result.mappings().all()]
+
+==========================================
+FILE: requirements.txt
+==========================================
+# --- Web framework ---
+fastapi>=0.110
+uvicorn[standard]>=0.29
+
+# --- Database (confirmed via Module 2 + 3/4 requirements files) ---
+SQLAlchemy>=2.0
+GeoAlchemy2>=0.14
+psycopg2-binary>=2.9.10
+alembic>=1.13          # optional upgrade path
+
+# --- Validation / settings ---
+pydantic>=2.6
+pydantic-settings>=2.2
+python-dotenv>=1.0
+
+# --- Background jobs (confirmed: celery_app.py, workers/*) ---
+celery>=5.3
+redis>=5.0
+
+# --- HTTP clients (confirmed via imports) ---
+httpx>=0.27
+requests>=2.31
+
+# --- Auth / security ---
+passlib[bcrypt]>=1.7
+python-jose[cryptography]>=3.3
+python-multipart>=0.0.9
+
+# --- Notifications (confirmed via imports) ---
+pywebpush>=1.14
+
+# --- Storage (confirmed via imports; only needed if RAW_STORAGE_BACKEND=s3) ---
+boto3>=1.34
+
+# --- Ops (confirmed via imports) ---
+prometheus_client>=0.20
+
+# --- Testing (confirmed via imports + pytest.ini) ---
+pytest>=8.0
+pytest-asyncio>=0.23
+
+slowapi>=0.1.9
+
