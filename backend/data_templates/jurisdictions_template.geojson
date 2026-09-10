@@ -1,0 +1,38 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "D5 Marina Police Station",
+        "authority_type": "local_police",
+        "contact_phone": "+91 44 2345 2558",
+        "contact_email": "",
+        "escalation_level": 1
+      },
+      "geometry": {"type": "MultiPolygon", "coordinates": [[[[80.276,13.036],[80.283,13.036],[80.283,13.043],[80.276,13.043],[80.276,13.036]]]]}
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Marina Marine Police Station, Coastal Security Group",
+        "authority_type": "marine_police",
+        "contact_phone": "1093",
+        "contact_email": "",
+        "escalation_level": 2
+      },
+      "geometry": {"type": "MultiPolygon", "coordinates": [[[[80.282,13.064],[80.289,13.064],[80.289,13.071],[80.282,13.071],[80.282,13.064]]]]}
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Indian Coast Guard Regional Headquarters Chennai",
+        "authority_type": "coast_guard",
+        "contact_phone": "+91-44-25391718",
+        "contact_email": "",
+        "escalation_level": 3
+      },
+      "geometry": {"type": "MultiPolygon", "coordinates": [[[[80.284,13.065],[80.291,13.065],[80.291,13.072],[80.284,13.072],[80.284,13.065]]]]}
+    }
+  ]
+}
