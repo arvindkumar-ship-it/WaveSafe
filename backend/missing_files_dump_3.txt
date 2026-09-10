@@ -1,0 +1,412 @@
+==========================================
+FILE: app\core\audit.py
+==========================================
+"""
+app/core/audit.py
+
+Canonical audit logger (B4). This is THE single audit write path — every other call site
+across the codebase must point here instead of its own local variant. Three variants existed
+before this file:
+    1. app.core.audit.log_audit_event(...)          <- this one, now canonical
+    2. app.audit.record_event(...)                   <- dispatch_state_machine.py, fix import (see below)
+    3. app.services.audit_service.log_audit_event(...) <- module18's async version, superseded
+
+Signature matches every real call site found in m814 (sos_service.py, fanout_service.py,
+hospital_router_service.py, authority_router_service.py) and modules-20-to-26 (internal_service.py,
+incident_service.py, trip_service.py):
+
+    log_audit_event(db, event_type="sos.triggered", entity_type="incident_report",
+                     entity_id=incident_id, actor_type="user", actor_id=user_id,
+                     payload={...})
+
+Writes to the `audit_events` table, which module18's audit_service.py confirms already exists
+(created by Module 2's migration — insert-only table: event_type, entity_type, entity_id,
+actor_type, actor_id, payload jsonb, created_at).
+
+Sync version (per project-wide sync decision) — db is a plain SQLAlchemy Session, no await.
+"""
+import json
+from typing import Any, Optional
+
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+
+def log_audit_event(
+    db: Session,
+    event_type: str,
+    entity_type: str,
+    entity_id: Optional[Any] = None,
+    actor_type: str = "system",
+    actor_id: Optional[Any] = None,
+    payload: Optional[dict] = None,
+) -> None:
+    db.execute(
+        text(
+            """INSERT INTO audit_events (event_type, entity_type, entity_id, actor_type, actor_id, payload)
+               VALUES (:event_type, :entity_type, :entity_id, :actor_type, :actor_id, :payload)"""
+        ),
+        {
+            "event_type": event_type,
+            "entity_type": entity_type,
+            "entity_id": str(entity_id) if entity_id is not None else None,
+            "actor_type": actor_type,
+            "actor_id": str(actor_id) if actor_id is not None else None,
+            "payload": json.dumps(payload or {}, default=str),
+        },
+    )
+    # Intentionally no db.commit() here — callers already commit as part of their own
+    # transaction (confirmed pattern in trip_service.py: log_audit_event(...) is followed
+    # by a single db.commit() that covers both the business write and this audit write
+    # atomically). Calling commit() here would break that atomicity.
+
+==========================================
+FILE: app\schemas\audit.py
+==========================================
+# MODULE 18: Audit and Analytics — Schemas
+
+from typing import Any, Literal, Optional
+
+from pydantic import BaseModel
+
+
+class AuditEventInput(BaseModel):
+    event_type: str
+    entity_type: str
+    entity_id: str
+    actor_type: Literal["user", "admin", "system", "worker"] = "system"
+    actor_id: Optional[str] = None
+    metadata: dict[str, Any] = {}
+
+
+class StatusChangeInput(BaseModel):
+    incident_report_id: str
+    from_status: Optional[str] = None
+    to_status: str
+    reason: Optional[str] = None
+
+
+class AckLogInput(BaseModel):
+    incident_route_id: str
+    ack_status: str
+    ack_time: str
+
+
+class MeanResponseTimeResult(BaseModel):
+    window_days: int
+    mean_response_time_s: float
+    sample_size: int
+
+
+class AlertAccuracyResult(BaseModel):
+    window_days: int
+    total_alerts: int
+    true_positive_alerts: int
+    false_positive_alerts: int
+    accuracy: float
+    false_positive_rate: float
+
+
+class MissedWarningResult(BaseModel):
+    window_days: int
+    total_incidents: int
+    missed_incidents: int
+    missed_warning_rate: float
+
+
+class ThresholdRefitRecommendation(BaseModel):
+    beach_id: str
+    activity_type: str
+    rule_parameter: str
+    current_value: Optional[float] = None
+    recommended_value: float
+    justification: str
+    based_on_incident_count: int
+
+
+==========================================
+FILE: app\services\notification_service.py
+==========================================
+"""
+Module 13 — Notification Service. Canonical contract, matching real callers found in the
+codebase during the Module 8/9/10/14/27 consistency check:
+- enqueue(...)  <- called by dispatch_state_machine.py (title/body already built) AND by
+                    fanout_service/sos_service etc. (template_key + vars)
+- deliver(db, notification) -> bool  <- called by notification_worker.flush_notification_queue
+"""
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+from app.models.incident import NotificationQueue
+from app.services.notification_templates import render_template
+from app.services.channels.push_channel import send_push
+from app.services.channels.sms_channel import send_sms
+
+# Tiers that require SMS as well as push (mirrors Module 27's priority mapping: critical/high -> both)
+SMS_PRIORITIES = {"critical", "high"}
+FULL_SCREEN_PRIORITIES = {"critical"}
+
+
+def enqueue(
+    db: Session,
+    *,
+    incident_report_id=None,
+    user_id=None,
+    type: str,
+    priority: str = "normal",
+    title: str | None = None,
+    body: str | None = None,
+    template_key: str | None = None,
+    vars: dict | None = None,
+    locale: str = "en",
+) -> NotificationQueue:
+    if template_key:
+        rendered = render_template(db, template_key, locale, vars or {})
+        title, body = rendered["title"], rendered["body"]
+    if title is None or body is None:
+        raise ValueError("enqueue() requires either title+body or template_key")
+
+    # If caller didn't pass user_id (Module 27's state-machine calls don't), resolve from the incident.
+    if user_id is None and incident_report_id is not None:
+        row = db.execute(
+            text("SELECT user_id FROM incident_reports WHERE id = :id"),
+            {"id": str(incident_report_id)},
+        ).mappings().first()
+        user_id = row["user_id"] if row else None
+
+    n = NotificationQueue(
+        user_id=user_id, incident_report_id=incident_report_id, type=type, priority=priority,
+        title=title, body=body, channel="push", status="queued",
+        full_screen=priority in FULL_SCREEN_PRIORITIES, locale=locale, delivery_meta={},
+    )
+    db.add(n)
+    db.flush()
+    return n
+
+
+def deliver(db: Session, notification: NotificationQueue) -> bool:
+    """Called by notification_worker per-row. Returns True only if EVERY required channel succeeded."""
+    ok = True
+
+    push_result = send_push(db, str(notification.user_id), notification.title, notification.body, notification.full_screen)
+    if not push_result["ok"]:
+        ok = False
+
+    if notification.priority in SMS_PRIORITIES:
+        phone_row = db.execute(
+            text("SELECT phone FROM users WHERE id = :id"), {"id": str(notification.user_id)}
+        ).mappings().first()
+        sms_result = send_sms(phone_row["phone"] if phone_row else "", notification.body)
+        if not sms_result["ok"]:
+            ok = False
+
+    return ok
+
+
+==========================================
+FILE: app\services\escalation_service.py
+==========================================
+"""
+Module 26/27 support — ack-timer persistence.
+One active timer per incident (enforced by partial unique index on ack_timers).
+escalation_worker (Celery Beat) polls due timers and drives the state machine.
+"""
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+
+def schedule_ack_check(
+    db: Session,
+    *,
+    incident_id: uuid.UUID,
+    timeout_seconds: int,
+    on_timeout_state,  # IncidentState
+) -> None:
+    """Replace any existing active timer for this incident with a new one."""
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=timeout_seconds)
+    db.execute(
+        text(
+            "UPDATE ack_timers SET active = false "
+            "WHERE incident_report_id = :iid AND active = true"
+        ),
+        {"iid": str(incident_id)},
+    )
+    db.execute(
+        text(
+            "INSERT INTO ack_timers "
+            "(id, incident_report_id, on_timeout_state, expires_at, active, created_at) "
+            "VALUES (:id, :iid, :state, :exp, true, :now)"
+        ),
+        {
+            "id": str(uuid.uuid4()),
+            "iid": str(incident_id),
+            "state": on_timeout_state.value,
+            "exp": expires_at,
+            "now": datetime.now(timezone.utc),
+        },
+    )
+
+
+def cancel_ack_check(db: Session, *, incident_id: uuid.UUID) -> None:
+    db.execute(
+        text(
+            "UPDATE ack_timers SET active = false "
+            "WHERE incident_report_id = :iid AND active = true"
+        ),
+        {"iid": str(incident_id)},
+    )
+
+
+def get_due_timers(db: Session, *, limit: int = 100) -> list[dict]:
+    """Fetch expired, still-active timers for escalation_worker to process."""
+    rows = db.execute(
+        text(
+            "SELECT id, incident_report_id, on_timeout_state "
+            "FROM ack_timers "
+            "WHERE active = true AND expires_at <= :now "
+            "ORDER BY expires_at ASC LIMIT :limit"
+        ),
+        {"now": datetime.now(timezone.utc), "limit": limit},
+    ).fetchall()
+    return [
+        {"timer_id": r[0], "incident_id": r[1], "on_timeout_state": r[2]}
+        for r in rows
+    ]
+
+
+def consume_timer(db: Session, *, timer_id: uuid.UUID) -> None:
+    """Mark a timer processed so escalation_worker doesn't re-fire it."""
+    db.execute(
+        text("UPDATE ack_timers SET active = false WHERE id = :id"),
+        {"id": str(timer_id)},
+    )
+
+
+==========================================
+FILE: app\models\forecast_risk.py
+==========================================
+"""Module 2C â€” Forecast & risk tables. Matches exact SQL: beach_activity_profiles,
+beach_forecasts, hazard_alerts, beach_risk_scores, trip_plans, trip_risk_snapshots."""
+from __future__ import annotations
+from sqlalchemy import Column, Text, Boolean, Numeric, Integer, DateTime, ForeignKey, UniqueConstraint, Index
+from sqlalchemy.dialects.postgresql import UUID, JSONB
+from geoalchemy2 import Geometry
+from datetime import datetime, timezone
+
+from .base import Base, uuid_pk
+
+
+class BeachActivityProfile(Base):
+    __tablename__ = "beach_activity_profiles"
+    __table_args__ = (UniqueConstraint("beach_id", "activity_type", name="uniq_beach_activity"),)
+    id = uuid_pk()
+    beach_id = Column(UUID(as_uuid=True), ForeignKey("beaches.id", ondelete="CASCADE"), nullable=False)
+    activity_type = Column(Text, nullable=False)
+    min_safe_wave_height = Column(Numeric(8, 3))
+    max_safe_current_speed = Column(Numeric(8, 3))
+    max_safe_wind_speed = Column(Numeric(8, 3))
+    max_safe_swell = Column(Numeric(8, 3))
+    water_quality_min = Column(Numeric(8, 3))
+    tide_sensitivity = Column(Numeric(8, 3))
+    risk_weights = Column(JSONB, nullable=False, default=dict)
+    active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class BeachForecast(Base):
+    __tablename__ = "beach_forecasts"
+    __table_args__ = (Index("idx_beach_forecasts_beach_time", "beach_id", "forecast_time"),)
+    id = uuid_pk()
+    beach_id = Column(UUID(as_uuid=True), ForeignKey("beaches.id", ondelete="CASCADE"), nullable=False)
+    forecast_time = Column(DateTime(timezone=True), nullable=False)
+    wave_height = Column(Numeric(8, 3))
+    current_speed = Column(Numeric(8, 3))
+    wind_speed = Column(Numeric(8, 3))
+    swell_height = Column(Numeric(8, 3))
+    tide_state = Column(Text)
+    rainfall = Column(Numeric(8, 3))
+    visibility = Column(Numeric(8, 3))
+    water_quality = Column(Numeric(8, 3))
+    source = Column(Text, nullable=False)
+    raw_payload = Column(JSONB)
+    ingested_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class HazardAlert(Base):
+    __tablename__ = "hazard_alerts"
+    __table_args__ = (Index("idx_hazard_alerts_validity", "valid_from", "valid_to"),)
+    id = uuid_pk()
+    source_system = Column(Text, nullable=False)
+    source_alert_id = Column(Text)
+    alert_type = Column(Text, nullable=False)
+    severity = Column(Text, nullable=False)
+    title = Column(Text)
+    description = Column(Text)
+    geom = Column(Geometry("MULTIPOLYGON", srid=4326, spatial_index=False))
+    issued_at = Column(DateTime(timezone=True), nullable=False)
+    valid_from = Column(DateTime(timezone=True))
+    valid_to = Column(DateTime(timezone=True))
+    eta_minutes = Column(Integer)
+    hard_override_flag = Column(Boolean, default=False)
+    raw_payload = Column(JSONB)
+    status = Column(Text, default="active")
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class BeachRiskScore(Base):
+    __tablename__ = "beach_risk_scores"
+    __table_args__ = (Index("idx_risk_scores_lookup", "beach_id", "activity_type", "forecast_time"),)
+    id = uuid_pk()
+    beach_id = Column(UUID(as_uuid=True), ForeignKey("beaches.id", ondelete="CASCADE"), nullable=False)
+    activity_type = Column(Text, nullable=False)
+    forecast_time = Column(DateTime(timezone=True), nullable=False)
+    computed_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    risk_score = Column(Numeric(8, 5), nullable=False)
+    verdict = Column(Text, nullable=False)
+    explanation = Column(JSONB, nullable=False, default=dict)
+    hard_override_reason = Column(Text)
+    version = Column(Integer, nullable=False, default=1)
+
+
+class TripStatus:
+    ACTIVE = "active"
+    CANCELLED = "cancelled"
+    COMPLETED = "completed"
+
+
+class TripRecommendation:
+    GO = "go"
+    CAUTION = "caution"
+    AVOID_TRIP = "avoid_trip"
+
+
+class TripPlan(Base):
+    __tablename__ = "trip_plans"
+    id = uuid_pk()
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    beach_id = Column(UUID(as_uuid=True), ForeignKey("beaches.id"), nullable=False)
+    activity_type = Column(Text, nullable=False)
+    planned_from = Column(DateTime(timezone=True), nullable=False)
+    planned_to = Column(DateTime(timezone=True), nullable=False)
+    status = Column(Text, nullable=False, default="active")
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class TripRiskSnapshot(Base):
+    __tablename__ = "trip_risk_snapshots"
+    id = uuid_pk()
+    trip_plan_id = Column(UUID(as_uuid=True), ForeignKey("trip_plans.id", ondelete="CASCADE"), nullable=False)
+    computed_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    min_risk = Column(Numeric(8, 5))
+    max_risk = Column(Numeric(8, 5))
+    recommendation = Column(Text)
+    safe_window_start = Column(DateTime(timezone=True))
+    safe_window_end = Column(DateTime(timezone=True))
+    explanation = Column(JSONB, nullable=False, default=dict)
+
+
+
