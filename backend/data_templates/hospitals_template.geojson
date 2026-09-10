@@ -1,0 +1,29 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Chennai National Hospital",
+        "type": "trauma_center",
+        "contact_phone": "+91 89390 33333",
+        "contact_email": "",
+        "capabilities": {"trauma": true, "icu": true, "pediatric": true, "oxygen": true, "coastal_access": true},
+        "capacity_status": "available"
+      },
+      "geometry": {"type": "Point", "coordinates": [80.2915071, 13.096446]}
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Tamil Nadu Government Multi Super Speciality Hospital",
+        "type": "general",
+        "contact_phone": "+91 44 2566 6000",
+        "contact_email": "",
+        "capabilities": {"trauma": true, "icu": true, "pediatric": false, "oxygen": true, "coastal_access": true},
+        "capacity_status": "available"
+      },
+      "geometry": {"type": "Point", "coordinates": [80.2737108, 13.0691876]}
+    }
+  ]
+}
