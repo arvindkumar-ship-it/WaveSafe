@@ -1,0 +1,226 @@
+==========================================
+FILE: app\core\config.py
+==========================================
+# """
+# app/core/config.py
+
+# Centralized settings for WaveSafe. Loaded once as a singleton `settings` object.
+# Every field here was cross-checked against actual `settings.X` references found in the
+# delivered modules (fanout_service.py, sms_channel.py, push_channel.py, hospital_router_service.py,
+# authority_router_service.py, and .env.example) â€” nothing here is guessed, all fields are consumed
+# somewhere in the copied code.
+# """
+# from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+# class Settings(BaseSettings):
+#     # --- Core ---
+#     APP_BASE_URL: str = "http://localhost:8000"
+#     ENVIRONMENT: str = "local"
+#     SECRET_KEY: str
+#     INTERNAL_API_KEY: str = ""
+
+#     # --- Database ---
+#     DATABASE_URL: str
+#     TEST_DATABASE_URL: str = ""
+
+#     # --- Redis / Celery ---
+#     REDIS_URL: str
+
+#     # --- Module 3: ingestion sources ---
+#     INCOIS_BASE_URL: str = ""
+#     INCOIS_API_KEY: str = ""
+#     INCOIS_POLL_SECONDS: int = 900
+#     SACHET_CAP_FEED_URL: str = ""
+#     SACHET_API_KEY: str = ""
+#     SACHET_POLL_SECONDS: int = 120
+
+#     # --- Module 3: raw payload storage ---
+#     RAW_STORAGE_BACKEND: str = "local"
+#     RAW_STORAGE_LOCAL_PATH: str = "/var/data/raw_ingest"
+#     RAW_STORAGE_S3_BUCKET: str = ""
+#     RAW_STORAGE_S3_PREFIX: str = "raw-ingest"
+
+#     # --- Module 3/32: ops alerting ---
+#     OPS_ALERT_WEBHOOK_URL: str = ""
+#     OPS_ALERT_MIN_FAILURES: int = 3
+
+#     # --- Module 13: notifications (confirmed used in channels/push_channel.py, sms_channel.py) ---
+#     VAPID_PUBLIC_KEY: str = ""
+#     VAPID_PRIVATE_KEY: str = ""
+#     VAPID_SUBJECT: str = "mailto:ops@example.com"
+#     SMS_GATEWAY_URL: str = ""
+#     SMS_GATEWAY_KEY: str = ""
+
+#     # --- JWT (used internally by app.core.security, not directly referenced elsewhere) ---
+#     JWT_ALGORITHM: str = "HS256"
+#     JWT_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days â€” mobile-first app, long-lived session
+
+#     # --- Frontend build-time (not consumed by backend, present for completeness) ---
+#     NEXT_PUBLIC_API_BASE_URL: str = "http://localhost:8000"
+
+#     # --- Module 28: staging-only smoke test ---
+#     PUBLIC_API_BASE_URL: str = ""
+#     SMOKE_TEST_PHONE: str = ""
+#     SMOKE_TEST_OTP: str = ""
+
+#     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+
+# settings = Settings()
+
+
+
+"""
+app/core/config.py
+
+Centralized settings for WaveSafe. Loaded once as a singleton `settings` object.
+Every field here was cross-checked against actual `settings.X` references found in the
+delivered modules (fanout_service.py, sms_channel.py, push_channel.py, hospital_router_service.py,
+authority_router_service.py, and .env.example) â€” nothing here is guessed, all fields are consumed
+somewhere in the copied code.
+"""
+from pathlib import Path
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# .env lives at repo root (wavesafe/), NOT backend/. Resolve relative to this file
+# (backend/app/core/config.py -> parents[2] = repo root) so it works regardless of CWD â€”
+# same fix as db.py needed (pydantic-settings' own env_file="..." is CWD-relative by default).
+_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+
+
+class Settings(BaseSettings):
+    # --- Core ---
+    APP_BASE_URL: str = "http://localhost:8000"
+    ENVIRONMENT: str = "local"
+    SECRET_KEY: str
+    INTERNAL_API_KEY: str = ""
+
+    # --- Database ---
+    DATABASE_URL: str
+    TEST_DATABASE_URL: str = ""
+
+    # --- Redis / Celery ---
+    REDIS_URL: str
+
+    # --- Module 3: ingestion sources ---
+    INCOIS_BASE_URL: str = ""
+    INCOIS_API_KEY: str = ""
+    INCOIS_POLL_SECONDS: int = 900
+    SACHET_CAP_FEED_URL: str = ""
+    SACHET_API_KEY: str = ""
+    SACHET_POLL_SECONDS: int = 120
+
+    # --- Module 3: raw payload storage ---
+    RAW_STORAGE_BACKEND: str = "local"
+    RAW_STORAGE_LOCAL_PATH: str = "/var/data/raw_ingest"
+    RAW_STORAGE_S3_BUCKET: str = ""
+    RAW_STORAGE_S3_PREFIX: str = "raw-ingest"
+
+    # --- Module 3/32: ops alerting ---
+    OPS_ALERT_WEBHOOK_URL: str = ""
+    OPS_ALERT_MIN_FAILURES: int = 3
+
+    # --- Module 13: notifications (confirmed used in channels/push_channel.py, sms_channel.py) ---
+    VAPID_PUBLIC_KEY: str = ""
+    VAPID_PRIVATE_KEY: str = ""
+    VAPID_SUBJECT: str = "mailto:ops@example.com"
+    SMS_GATEWAY_URL: str = ""
+    SMS_GATEWAY_KEY: str = ""
+
+    # --- JWT (used internally by app.core.security, not directly referenced elsewhere) ---
+    JWT_ALGORITHM: str = "HS256"
+    JWT_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days â€” mobile-first app, long-lived session
+
+    # --- Frontend build-time (not consumed by backend, present for completeness) ---
+    NEXT_PUBLIC_API_BASE_URL: str = "http://localhost:8000"
+
+    # --- Module 28: staging-only smoke test ---
+    PUBLIC_API_BASE_URL: str = ""
+    SMOKE_TEST_PHONE: str = ""
+    SMOKE_TEST_OTP: str = ""
+
+    model_config = SettingsConfigDict(env_file=_ENV_PATH, env_file_encoding="utf-8", extra="ignore")
+
+
+settings = Settings()
+
+
+==========================================
+FILE: app\redis_client.py
+==========================================
+"""
+app/redis_client.py
+
+Single shared Redis connection, imported wherever raw Redis access is needed (Module 3's
+ingestion dedup, Module 5/6's risk & forecast caching via app.core.cache, Celery uses its
+own connection internally via REDIS_URL so this is not needed by celery_app.py itself).
+"""
+import redis
+
+from app.core.config import settings
+
+redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+
+==========================================
+FILE: app\workers\celery_app.py
+==========================================
+"""
+app/workers/celery_app.py â€” single Celery app shared by api/worker/beat containers
+(docker-compose.yml builds them all from the same image, different CMD).
+Queue names here must match the `-Q` flags in deploy/docker-compose.yml.
+"""
+
+from celery import Celery
+from app.core.config import settings
+
+celery_app = Celery(
+    "coastal_safety",
+    broker=settings.REDIS_URL,
+    backend=settings.REDIS_URL,
+    include=[
+        "app.workers.ingestion_worker",
+        "app.workers.risk_worker",
+        "app.workers.notification_worker",
+        "app.workers.escalation_worker",
+        "app.workers.cleanup_worker",
+    ],
+)
+
+celery_app.conf.task_routes = {
+    "workers.ingestion.*": {"queue": "ingestion"},
+    "workers.risk.*": {"queue": "risk"},
+    "workers.notification.*": {"queue": "notification"},
+    "workers.escalation.*": {"queue": "escalation"},
+    "workers.cleanup.*": {"queue": "cleanup"},
+}
+
+celery_app.conf.beat_schedule = {
+    "poll-hazard-sources": {
+        "task": "workers.ingestion.poll_sources",
+        "schedule": 60.0,
+    },
+    "recompute-risk-scores": {
+        "task": "workers.risk.recompute_all",
+        "schedule": 120.0,
+    },
+    "flush-notification-queue": {
+        "task": "workers.notification.flush_queue",
+        "schedule": 10.0,
+    },
+    # Module 27 wiring: ack-timer polling, must stay below ACK_TIMEOUT_SECONDS (90s).
+    "check-ack-timeouts": {
+        "task": "workers.escalation.check_ack_timeouts",
+        "schedule": 15.0,
+    },
+    "cleanup-expired-cache": {
+        "task": "workers.cleanup.prune_expired",
+        "schedule": 3600.0,
+    },
+}
+
+celery_app.conf.task_acks_late = True
+celery_app.conf.worker_prefetch_multiplier = 1
+celery_app.conf.timezone = "UTC"
+
+
