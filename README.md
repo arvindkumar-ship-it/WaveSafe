@@ -10,7 +10,7 @@ Wave-Safe is a unified web-based coastal safety and intelligence platform that c
   <a href="https://youtu.be/AKZOnFFqXSo" target="_blank">
     <img src="https://img.youtube.com/vi/AKZOnFFqXSo/maxresdefault.jpg" alt="Demo Video" width="80%" style="border-radius: 8px;" />
   </a>
-  <p><i>👆 Click image to watch the full 1-minute demo video!</i></p>
+  <!-- <p><i>👆 Click image to watch the full 1-minute demo video!</i></p> -->
 </div>
 
 ## 👥 Team
